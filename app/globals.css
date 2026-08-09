@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "./model-lab.css";
 
 :root{--ink:#17221d;--muted:#65736c;--line:#dfe5e1;--paper:#f3f5f1;--panel:#fff;--forest:#102c24;--forest-2:#173b30;--green:#0d6b4e;--green-soft:#e2f3e9;--lime:#c9ff68;--amber:#f5c75d;--amber-soft:#fff5d8;--red:#b94d48;--blue:#316f89;--sidebar:244px}
 @media(max-width:1120px){body .launch-flow{grid-template-columns:1fr 1fr}body .launch-flow>button{grid-column:1/-1}}@media(max-width:780px){body .launch-flow{grid-template-columns:1fr}body .launch-flow>button{grid-column:auto}}

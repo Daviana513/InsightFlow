@@ -9,6 +9,7 @@ import hashlib
 import json
 import mimetypes
 import sqlite3
+import subprocess
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -19,6 +20,10 @@ from urllib.parse import parse_qs, urlparse
 
 HOST = "127.0.0.1"
 PORT = 8765
+ROOT = Path(__file__).resolve().parents[1]
+OPENCLIP_PYTHON = ROOT / ".venv" / "bin" / "python"
+OPENCLIP_MODEL = ROOT / ".models" / "en_infographic_v3_balanced" / "infographic_classifier.pkl"
+OPENCLIP_METRICS = OPENCLIP_MODEL.with_name("metrics.json")
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".tif", ".tiff", ".bmp"}
 FIELD_ALIASES = {
     "record_id": ("record_id", "id", "post_id", "shortcode"),
@@ -115,6 +120,8 @@ CREATE TABLE IF NOT EXISTS runs (
   processed INTEGER NOT NULL DEFAULT 0,
   total INTEGER NOT NULL,
   threshold REAL NOT NULL,
+  candidate_count INTEGER NOT NULL DEFAULT 0,
+  message TEXT NOT NULL DEFAULT '',
   config_json TEXT NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -141,10 +148,38 @@ CREATE TABLE IF NOT EXISTS records (
   language TEXT NOT NULL DEFAULT '',
   preprocess_status TEXT NOT NULL CHECK(preprocess_status IN ('passed', 'image_missing')),
   preprocess_reason TEXT NOT NULL DEFAULT '',
+  clip_probability REAL,
+  clip_status TEXT NOT NULL DEFAULT 'pending',
+  clip_error TEXT NOT NULL DEFAULT '',
   PRIMARY KEY(run_id, record_id),
   FOREIGN KEY(run_id) REFERENCES runs(id)
 );
+CREATE TABLE IF NOT EXISTS training_labels (
+  project_id TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  label TEXT NOT NULL CHECK(label IN ('infographic', 'not_infographic', 'uncertain')),
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(project_id, record_id),
+  FOREIGN KEY(project_id) REFERENCES projects(id)
+);
 """
+
+
+def migrate(db: sqlite3.Connection) -> None:
+    additions = {
+        "runs": (("candidate_count", "INTEGER NOT NULL DEFAULT 0"), ("message", "TEXT NOT NULL DEFAULT ''")),
+        "records": (
+            ("clip_probability", "REAL"),
+            ("clip_status", "TEXT NOT NULL DEFAULT 'pending'"),
+            ("clip_error", "TEXT NOT NULL DEFAULT ''"),
+        ),
+    }
+    for table, columns in additions.items():
+        existing = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+        for name, declaration in columns:
+            if name not in existing:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+    db.execute("PRAGMA optimize")
 
 
 class State:
@@ -152,6 +187,7 @@ class State:
         self.lock = threading.Lock()
         self.project: dict | None = None
         self.db_path: Path | None = None
+        self.active_runs: set[str] = set()
 
     def open_project(self, images_dir: str, metadata_csv: str) -> dict:
         project = inspect_project(images_dir, metadata_csv)
@@ -162,6 +198,7 @@ class State:
         db_path = db_dir / "insightflow.db"
         with self.lock, sqlite3.connect(db_path) as db:
             db.executescript(SCHEMA)
+            migrate(db)
             db.execute(
                 """INSERT INTO projects VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET image_count=excluded.image_count,
@@ -191,7 +228,10 @@ class State:
         config = {"workflow_version": "local-first-v0.4", "openclip_threshold": threshold}
         with self.lock, self.connect() as db:
             db.execute(
-                "INSERT INTO runs VALUES (?, ?, 'ready', 'preprocess', 0, ?, ?, ?, ?, ?)",
+                """INSERT INTO runs
+                (id, project_id, status, stage, processed, total, threshold, candidate_count, message,
+                 config_json, created_at, updated_at)
+                VALUES (?, ?, 'ready', 'preprocess', 0, ?, ?, 0, '', ?, ?, ?)""",
                 (run_id, self.project["id"], self.project["record_count"], threshold,
                  json.dumps(config), timestamp, timestamp),
             )
@@ -262,16 +302,199 @@ class State:
         with self.lock, self.connect() as db:
             db.execute("DELETE FROM records WHERE run_id = ?", (run_id,))
             db.executemany(
-                "INSERT INTO records VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", records
+                """INSERT INTO records
+                (run_id, record_id, image_path, post_shortcode, image_index, caption, account_name,
+                 language, preprocess_status, preprocess_reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", records
             )
             db.execute(
-                "UPDATE runs SET status = 'paused', stage = 'openclip', processed = ?, total = ?, updated_at = ? WHERE id = ?",
+                """UPDATE runs SET status = 'paused', stage = 'openclip', processed = ?, total = ?,
+                message = '预处理完成，可以运行 OpenCLIP', updated_at = ? WHERE id = ?""",
                 (len(records), len(records), timestamp, run_id),
             )
         return {
             "run": self.get_run(run_id),
             "summary": {"total": len(records), "passed": passed, "image_missing": len(records) - passed},
         }
+
+    def openclip_runtime(self) -> dict:
+        metrics = {}
+        if OPENCLIP_METRICS.is_file():
+            metrics = json.loads(OPENCLIP_METRICS.read_text(encoding="utf-8"))
+        return {
+            "ready": OPENCLIP_PYTHON.is_file() and OPENCLIP_MODEL.is_file(),
+            "python_ready": OPENCLIP_PYTHON.is_file(),
+            "model_ready": OPENCLIP_MODEL.is_file(),
+            "model_version": OPENCLIP_MODEL.parent.name,
+            "model_path": str(OPENCLIP_MODEL),
+            "metrics": metrics,
+        }
+
+    def openclip_summary(self, run_id: str) -> dict:
+        run = self.get_run(run_id)
+        if not run:
+            raise ValueError("找不到该任务")
+        with self.lock, self.connect() as db:
+            row = db.execute(
+                """SELECT SUM(CASE WHEN clip_status = 'scored' THEN 1 ELSE 0 END) AS scored,
+                SUM(CASE WHEN clip_probability >= ? THEN 1 ELSE 0 END) AS candidates,
+                SUM(CASE WHEN clip_probability < ? THEN 1 ELSE 0 END) AS below_threshold,
+                SUM(CASE WHEN clip_status = 'error' THEN 1 ELSE 0 END) AS errors
+                FROM records WHERE run_id = ?""",
+                (run["threshold"], run["threshold"], run_id),
+            ).fetchone()
+        return {"run": run, "summary": {key: int(row[key] or 0) for key in row.keys()}}
+
+    def start_openclip(self, run_id: str) -> dict:
+        run = self.get_run(run_id)
+        if not run:
+            raise ValueError("找不到该任务")
+        if run["stage"] != "openclip":
+            return self.openclip_summary(run_id)
+        runtime = self.openclip_runtime()
+        if not runtime["ready"]:
+            raise ValueError("OpenCLIP 独立环境或分类器尚未准备好")
+        with self.lock:
+            already_running = run_id in self.active_runs
+            if not already_running:
+                self.active_runs.add(run_id)
+        if already_running:
+            return self.openclip_summary(run_id)
+
+        run_dir = Path(self.project["metadata_csv"]).parent / ".insightflow" / "runs" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        manifest = run_dir / "openclip_input.csv"
+        with self.lock, self.connect() as db, manifest.open("w", encoding="utf-8-sig", newline="") as handle:
+            rows = db.execute(
+                "SELECT record_id, image_path FROM records WHERE run_id = ? AND preprocess_status = 'passed' ORDER BY record_id",
+                (run_id,),
+            ).fetchall()
+            writer = csv.DictWriter(handle, fieldnames=("record_id", "image_path"))
+            writer.writeheader()
+            writer.writerows(dict(row) for row in rows)
+            config = json.loads(run["config_json"])
+            config["openclip_model"] = runtime["model_version"]
+            db.execute(
+                """UPDATE records SET clip_probability = NULL, clip_status = 'pending', clip_error = ''
+                WHERE run_id = ?""", (run_id,),
+            )
+            db.execute(
+                """UPDATE runs SET status = 'running', processed = 0, candidate_count = 0,
+                message = '正在启动 OpenCLIP', config_json = ?, updated_at = ? WHERE id = ?""",
+                (json.dumps(config, ensure_ascii=False), now(), run_id),
+            )
+        threading.Thread(target=self._run_openclip, args=(run_id, manifest), daemon=True).start()
+        return self.openclip_summary(run_id)
+
+    def _run_openclip(self, run_id: str, manifest: Path) -> None:
+        command = [
+            str(OPENCLIP_PYTHON), str(ROOT / "agent" / "openclip_runner.py"),
+            "--input", str(manifest), "--classifier", str(OPENCLIP_MODEL), "--device", "auto",
+        ]
+        try:
+            process = subprocess.Popen(
+                command, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            )
+            assert process.stdout
+            for line in process.stdout:
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if event.get("type") == "status":
+                    with self.lock, self.connect() as db:
+                        db.execute(
+                            "UPDATE runs SET message = ?, updated_at = ? WHERE id = ?",
+                            (event.get("message", "OpenCLIP 运行中"), now(), run_id),
+                        )
+                elif event.get("type") == "batch":
+                    updates = []
+                    for item in event.get("items", []):
+                        error = item.get("error", "")
+                        updates.append((item.get("probability"), "error" if error else "scored", error,
+                                        run_id, item.get("record_id", "")))
+                    with self.lock, self.connect() as db:
+                        db.executemany(
+                            """UPDATE records SET clip_probability = ?, clip_status = ?, clip_error = ?
+                            WHERE run_id = ? AND record_id = ?""",
+                            updates,
+                        )
+                        db.execute(
+                            "UPDATE runs SET processed = ?, message = '正在计算图片概率', updated_at = ? WHERE id = ?",
+                            (int(event.get("processed", 0)), now(), run_id),
+                        )
+            return_code = process.wait()
+            if return_code:
+                raise RuntimeError(f"OpenCLIP 运行失败（退出码 {return_code}）")
+            run = self.get_run(run_id)
+            with self.lock, self.connect() as db:
+                candidates = db.execute(
+                    "SELECT COUNT(*) FROM records WHERE run_id = ? AND clip_probability >= ?",
+                    (run_id, run["threshold"]),
+                ).fetchone()[0]
+                errors = db.execute(
+                    "SELECT COUNT(*) FROM records WHERE run_id = ? AND clip_status = 'error'", (run_id,)
+                ).fetchone()[0]
+                db.execute(
+                    """UPDATE runs SET status = 'paused', stage = 'gpt', candidate_count = ?,
+                    message = ?, updated_at = ? WHERE id = ?""",
+                    (candidates, f"OpenCLIP 完成：{candidates} 条进入候选，{errors} 条读取失败", now(), run_id),
+                )
+        except Exception as error:
+            with self.lock, self.connect() as db:
+                db.execute(
+                    "UPDATE runs SET status = 'paused', message = ?, updated_at = ? WHERE id = ?",
+                    (f"OpenCLIP 失败：{error}", now(), run_id),
+                )
+        finally:
+            with self.lock:
+                self.active_runs.discard(run_id)
+
+    def list_training_candidates(self, run_id: str, offset: int = 0, limit: int = 12) -> dict:
+        if not self.project:
+            raise ValueError("请先打开一个本地项目")
+        limit = min(max(limit, 1), 60)
+        offset = max(offset, 0)
+        with self.lock, self.connect() as db:
+            rows = db.execute(
+                """SELECT r.record_id, r.image_path, r.caption, r.account_name, r.post_shortcode,
+                r.image_index, t.label FROM records r
+                LEFT JOIN training_labels t ON t.project_id = ? AND t.record_id = r.record_id
+                WHERE r.run_id = ? AND r.preprocess_status = 'passed'
+                ORDER BY r.record_id LIMIT ? OFFSET ?""",
+                (self.project["id"], run_id, limit, offset),
+            ).fetchall()
+            total = db.execute(
+                "SELECT COUNT(*) FROM records WHERE run_id = ? AND preprocess_status = 'passed'", (run_id,)
+            ).fetchone()[0]
+            counts = {row[0]: row[1] for row in db.execute(
+                "SELECT label, COUNT(*) FROM training_labels WHERE project_id = ? GROUP BY label",
+                (self.project["id"],),
+            ).fetchall()}
+        return {"items": [dict(row) for row in rows], "total": total, "offset": offset, "limit": limit, "counts": counts}
+
+    def save_training_label(self, payload: dict) -> dict:
+        if not self.project:
+            raise ValueError("请先打开一个本地项目")
+        if payload.get("label") not in {"infographic", "not_infographic", "uncertain"}:
+            raise ValueError("不支持的训练标签")
+        if not payload.get("record_id"):
+            raise ValueError("训练标签缺少记录 ID")
+        with self.lock, self.connect() as db:
+            exists = db.execute(
+                """SELECT 1 FROM records r JOIN runs u ON u.id = r.run_id
+                WHERE u.project_id = ? AND r.record_id = ? LIMIT 1""",
+                (self.project["id"], payload["record_id"]),
+            ).fetchone()
+            if not exists:
+                raise ValueError("训练图片不属于当前项目")
+            db.execute(
+                """INSERT INTO training_labels VALUES (?, ?, ?, ?)
+                ON CONFLICT(project_id, record_id) DO UPDATE SET
+                label = excluded.label, updated_at = excluded.updated_at""",
+                (self.project["id"], payload["record_id"], payload["label"], now()),
+            )
+        return {"saved": True}
 
     def save_review(self, payload: dict) -> dict:
         required = ("run_id", "record_id", "stage", "decision")
@@ -352,6 +575,18 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, {"ok": True, "version": "0.1", "project": STATE.project})
             elif parsed.path == "/runs/current":
                 self.send_json(200, {"run": STATE.get_run() if STATE.project else None})
+            elif parsed.path == "/models/openclip":
+                self.send_json(200, STATE.openclip_runtime())
+            elif parsed.path.startswith("/runs/") and parsed.path.endswith("/openclip"):
+                run_id = parsed.path.strip("/").split("/")[1]
+                self.send_json(200, STATE.openclip_summary(run_id))
+            elif parsed.path == "/training/candidates":
+                query = parse_qs(parsed.query)
+                self.send_json(200, STATE.list_training_candidates(
+                    query.get("run_id", [""])[0],
+                    int(query.get("offset", ["0"])[0]),
+                    int(query.get("limit", ["12"])[0]),
+                ))
             elif parsed.path == "/image":
                 self.send_image(parse_qs(parsed.query).get("path", [""])[0])
             else:
@@ -371,6 +606,11 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path.startswith("/runs/") and self.path.endswith("/preprocess"):
                 run_id = self.path.strip("/").split("/")[1]
                 self.send_json(200, STATE.preprocess_run(run_id))
+            elif self.path.startswith("/runs/") and self.path.endswith("/openclip"):
+                run_id = self.path.strip("/").split("/")[1]
+                self.send_json(202, STATE.start_openclip(run_id))
+            elif self.path == "/training/labels":
+                self.send_json(200, STATE.save_training_label(payload))
             elif self.path == "/reviews":
                 self.send_json(200, STATE.save_review(payload))
             else:

@@ -52,7 +52,15 @@ npm run local
 
 CSV 至少需要一个稳定记录字段（`record_id` / `id` / `post_id` / `shortcode`）和一个图片路径字段（`image_path` / `file_path` / `filename` / `image` / `media_path`）。图片路径可以是相对于图片文件夹的路径。
 
-当前本地模式会在预处理完成后明确停在 OpenCLIP 配置页。OpenCLIP 实际推理需要单独安装 ML 环境并选择语言对应的分类器；在真实候选集生成前，系统不会把脱敏示例误当成真实审核队列。
+本地模式现在可以使用独立的 OpenCLIP 环境运行 `ViT-B-32 + Logistic Regression` 分类器，逐张保存概率，并按任务创建时冻结的 `p >= 0.10` 生成真实候选集。OpenCLIP 页同时提供一个独立的“选择训练图片”入口，人工标注会保存到项目数据库，但不会自动改变当前模型或污染本次筛选结果。
+
+首次使用模型环境：
+
+```bash
+npm run ml:setup
+```
+
+将可信的分类器放到 `.models/en_infographic_v3_balanced/infographic_classifier.pkl`；可选的 `metrics.json` 放在同一目录。首次真实运行时会下载 OpenCLIP 预训练权重。
 
 ## Prerequisites
 
@@ -71,6 +79,7 @@ npm run build
 - `npm run dev`: start local development
 - `npm run local`: start the local UI and Local Agent together
 - `npm run agent`: start only the Local Agent on `127.0.0.1:8765`
+- `npm run ml:setup`: create the isolated OpenCLIP environment
 - `npm run build`: verify the vinext build output
 - `npm test`: build and verify the server-rendered product shell
 - `npm run db:generate`: generate Drizzle migrations after schema changes

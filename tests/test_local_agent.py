@@ -31,6 +31,18 @@ class LocalAgentTest(unittest.TestCase):
             preprocessed = state.preprocess_run(run["id"])
             self.assertEqual(preprocessed["run"]["stage"], "openclip")
             self.assertEqual(preprocessed["summary"]["passed"], 1)
+            self.assertEqual(state.openclip_summary(run["id"])["summary"]["scored"], 0)
+            self.assertTrue(state.save_training_label({"record_id": "1", "label": "infographic"})["saved"])
+            candidates = state.list_training_candidates(run["id"])
+            self.assertEqual(candidates["items"][0]["label"], "infographic")
+            with state.connect() as db:
+                db.execute(
+                    "UPDATE records SET clip_probability = 0.75, clip_status = 'scored' WHERE run_id = ?",
+                    (run["id"],),
+                )
+            summary = state.openclip_summary(run["id"])["summary"]
+            self.assertEqual(summary["scored"], 1)
+            self.assertEqual(summary["candidates"], 1)
             self.assertEqual(state.update_run(run["id"], "running")["status"], "running")
             self.assertTrue(state.save_review({
                 "run_id": run["id"], "record_id": "1", "stage": "human", "decision": "keep"

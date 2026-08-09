@@ -1,0 +1,68 @@
+.model-stack > div:last-child small {
+  grid-column: 1 / -1;
+  color: #91aaa1;
+  font-size: 8px;
+}
+
+.model-mode-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+
+.model-mode-tabs button {
+  padding: 10px 15px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.model-mode-tabs button.active {
+  border-color: var(--green);
+  background: var(--green);
+  color: #fff;
+}
+
+.clip-progress { margin: 16px 0; }
+.clip-progress i { display: block; height: 8px; overflow: hidden; border-radius: 99px; background: #e2e9e4; }
+.clip-progress i span { display: block; height: 100%; background: var(--green); }
+.clip-progress small { display: block; margin-top: 6px; color: var(--muted); font: 600 9px var(--font-geist-mono); }
+
+.training-intro {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 14px;
+}
+
+.training-intro h2 { margin: 7px 0; }
+.training-intro p { max-width: 650px; margin: 0; color: var(--muted); font-size: 10px; line-height: 1.6; }
+.training-counts { display: flex; gap: 8px; }
+.training-counts span { min-width: 82px; padding: 10px; border-radius: 8px; background: #f3f6f4; color: var(--muted); font-size: 8px; }
+.training-counts b { display: block; margin-bottom: 3px; color: var(--ink); font: 600 18px var(--font-geist-mono); }
+
+.training-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.training-card { overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+.training-thumb { height: 190px; background: #edf1ee center / contain no-repeat; }
+.training-card > div:nth-child(2) { display: flex; flex-direction: column; padding: 10px 11px 4px; }
+.training-card b { font: 700 9px var(--font-geist-mono); }
+.training-card small { margin-top: 4px; color: var(--muted); font-size: 8px; }
+.training-card p { height: 39px; margin: 8px 0; overflow: hidden; color: var(--muted); font-size: 9px; line-height: 1.45; }
+.training-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; padding: 8px 10px 11px; }
+.training-actions button { padding: 7px 3px; border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--ink); font-size: 8px; }
+.training-actions .selected.keep { border-color: var(--green); background: var(--green); color: #fff; }
+.training-actions .selected.remove { border-color: var(--red); background: var(--red); color: #fff; }
+.training-actions .selected.uncertain { border-color: var(--amber); background: var(--amber); color: #2b2514; }
+.training-pager { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 16px; }
+.training-pager span { color: var(--muted); font: 600 9px var(--font-geist-mono); }
+.training-loading { padding: 70px 20px; color: var(--muted); text-align: center; }
+
+@media (max-width: 780px) {
+  .training-intro { align-items: flex-start; flex-direction: column; }
+  .training-counts { width: 100%; overflow-x: auto; }
+  .training-grid { grid-template-columns: 1fr; }
+}

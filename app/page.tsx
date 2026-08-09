@@ -29,7 +29,20 @@ type LocalRun = {
   processed: number;
   total: number;
   threshold: number;
+  candidate_count: number;
+  message: string;
 };
+
+type OpenClipRuntime = {
+  ready: boolean;
+  model_version: string;
+  metrics: { sample_counts?: { labeled_images?: number; positive_images?: number; negative_images?: number }; test_metrics_at_0_60?: { recall?: number; precision?: number } };
+};
+
+type OpenClipSummary = { scored: number; candidates: number; below_threshold: number; errors: number };
+type TrainingLabel = "infographic" | "not_infographic" | "uncertain";
+type TrainingCandidate = { record_id: string; image_path: string; caption: string; account_name: string; post_shortcode: string; image_index: string; label: TrainingLabel | null };
+type TrainingPage = { items: TrainingCandidate[]; total: number; offset: number; limit: number; counts: Partial<Record<TrainingLabel, number>> };
 
 type ReviewRecord = {
   id: string;
@@ -93,6 +106,11 @@ async function agentRequest<T>(path: string, init?: RequestInit): Promise<T> {
   return result;
 }
 
+function agentImageUrl(path: string) {
+  const host = window.location.hostname === "127.0.0.1" ? "127.0.0.1" : "localhost";
+  return `http://${host}:8765/image?path=${encodeURIComponent(path)}`;
+}
+
 function download(name: string, content: string, type: string) {
   const url = URL.createObjectURL(new Blob([content], { type }));
   const link = document.createElement("a");
@@ -142,6 +160,12 @@ export default function Home() {
   const [metadataCsv, setMetadataCsv] = useState("");
   const [setupBusy, setSetupBusy] = useState(false);
   const [preprocessBusy, setPreprocessBusy] = useState(false);
+  const [openclipBusy, setOpenclipBusy] = useState(false);
+  const [openclipRuntime, setOpenclipRuntime] = useState<OpenClipRuntime | null>(null);
+  const [openclipSummary, setOpenclipSummary] = useState<OpenClipSummary>({ scored: 0, candidates: 0, below_threshold: 0, errors: 0 });
+  const [openclipMode, setOpenclipMode] = useState<"screen" | "train">("screen");
+  const [trainingPage, setTrainingPage] = useState<TrainingPage | null>(null);
+  const [trainingBusy, setTrainingBusy] = useState(false);
   const [setupError, setSetupError] = useState("");
   const [notice, setNotice] = useState("这是脱敏交互预览。真实研究数据由电脑上的 Local Agent 处理，不会上传到此站点。");
 
@@ -184,6 +208,13 @@ export default function Home() {
           setMetadataCsv(result.project.metadata_csv);
           const current = await agentRequest<{ run: LocalRun | null }>("/runs/current");
           setLocalRun(current.run);
+          const runtime = await agentRequest<OpenClipRuntime>("/models/openclip");
+          setOpenclipRuntime(runtime);
+          if (current.run && current.run.stage !== "preprocess") {
+            const clip = await agentRequest<{ run: LocalRun; summary: OpenClipSummary }>(`/runs/${current.run.id}/openclip`);
+            setLocalRun(clip.run);
+            setOpenclipSummary(clip.summary);
+          }
         }
       } catch (error) {
         setAgentConnected(false);
@@ -321,6 +352,49 @@ export default function Home() {
     }
   };
 
+  const runOpenClip = async () => {
+    if (!localRun) return;
+    setOpenclipBusy(true);
+    try {
+      const result = await agentRequest<{ run: LocalRun; summary: OpenClipSummary }>(`/runs/${localRun.id}/openclip`, {
+        method: "POST", body: "{}",
+      });
+      setLocalRun(result.run);
+      setOpenclipSummary(result.summary);
+      setNotice("OpenCLIP 已开始运行。首次使用会先准备模型文件，页面会自动刷新进度。");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法启动 OpenCLIP");
+    } finally {
+      setOpenclipBusy(false);
+    }
+  };
+
+  const loadTrainingCandidates = async (offset = 0) => {
+    if (!localRun) return;
+    setTrainingBusy(true);
+    try {
+      setTrainingPage(await agentRequest<TrainingPage>(`/training/candidates?run_id=${encodeURIComponent(localRun.id)}&offset=${offset}&limit=12`));
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法读取训练候选图片");
+    } finally {
+      setTrainingBusy(false);
+    }
+  };
+
+  const setTrainingLabel = async (candidate: TrainingCandidate, label: TrainingLabel) => {
+    try {
+      await agentRequest("/training/labels", { method: "POST", body: JSON.stringify({ record_id: candidate.record_id, label }) });
+      await loadTrainingCandidates(trainingPage?.offset ?? 0);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "训练标签保存失败");
+    }
+  };
+
+  const switchOpenClipMode = (mode: "screen" | "train") => {
+    setOpenclipMode(mode);
+    if (mode === "train" && !trainingPage) void loadTrainingCandidates();
+  };
+
   const exportCsv = () => {
     const headers = ["record_id", "file_name", "clip_probability", "gpt_decision", "human_correction", "residual_cleanup", "c2pa_status", "external_risk", "human_ai_review", "final_decision", "note"];
     const rows = finalRecords.map((record) => [record.id, record.fileName, record.clip, record.gpt, record.humanGptDecision, record.residualDecision, record.c2pa, record.tencentResult, record.humanAiReview, record.final, record.note].map(csvCell).join(","));
@@ -336,6 +410,8 @@ export default function Home() {
   const liveMode = isLocalMode && agentConnected;
   const openSetup = () => liveMode ? setShowProjectSetup(true) : setShowLocalHelp(true);
   const preprocessComplete = Boolean(localRun && localRun.stage !== "preprocess");
+  const openclipComplete = Boolean(localRun && !["preprocess", "openclip"].includes(localRun.stage));
+  const activeThreshold = liveMode && localRun ? localRun.threshold : threshold;
   const localPrimaryLabel = !localProject ? "打开真实项目" : !localRun ? "创建真实任务" : !preprocessComplete ? preprocessBusy ? "正在预处理…" : "开始预处理" : "进入 OpenCLIP";
   const localPrimaryAction = () => !localProject || !localRun ? setShowProjectSetup(true) : !preprocessComplete ? runPreprocess() : navigate("openclip");
 
@@ -346,8 +422,8 @@ export default function Home() {
     const visibleRunState = liveMode ? localRun?.status === "running" ? "running" : localRun?.status === "complete" ? "complete" : "paused" : runState;
     const runRows = liveMode ? [
       ["01", "前期预处理", "LOCAL", localRun ? `${processed.toLocaleString()} / ${total.toLocaleString()}` : "等待创建任务", visibleRunState],
-      ["02", "OpenCLIP 高召回", "LOCAL", "等待接入处理器", "waiting"],
-      ["03", "GPT 单图审核", "API", "等待前序阶段", "waiting"],
+      ["02", "OpenCLIP 高召回", "LOCAL", openclipComplete ? `${localRun?.candidate_count ?? 0} 条候选` : localRun?.stage === "openclip" && localRun.status === "running" ? `${localRun.processed} / ${localRun.total}` : "等待开始", openclipComplete ? "complete" : localRun?.status === "running" ? "running" : "waiting"],
+      ["03", "GPT 单图审核", "API", openclipComplete ? "等待 API 配置" : "等待前序阶段", "waiting"],
       ["04", "人工纠正", "HUMAN", "等待真实候选集", "waiting"],
       ["05", "残留与来源检查", "MIXED", "等待前序阶段", "waiting"],
     ] : [
@@ -359,7 +435,7 @@ export default function Home() {
         <div className="agent-card"><div className="agent-card-head"><span className="agent-icon">LA</span><div><small>LOCAL AGENT</small><strong>{liveMode ? localProject ? `已连接 · ${localProject.name}` : "已连接 · 等待打开项目" : isLocalMode ? "本地界面已打开 · 运行器未连接" : "研究运行器未连接"}</strong></div><span className={`status-dot ${liveMode ? "online" : "offline"}`} /></div><p>{liveMode ? "当前页面只连接本机运行器。目录校验、任务状态与审核记录都会保存在你的电脑中。" : isLocalMode ? `页面会每 5 秒重试连接。${agentError ? `错误：${agentError}` : "请确认 Local Agent 仍在运行。"}` : "公开站点只展示脱敏运行镜像。启动本地版后，图片始终留在电脑，界面将显示真实设备、目录和任务状态。"}</p><button onClick={openSetup}>{liveMode ? localProject ? "查看本地项目" : "打开本地项目" : "查看本地研究模式"}</button></div>
       </div>
 
-      <div className="metric-strip"><article><span>原始记录</span><strong>{liveMode ? (localProject?.record_count ?? 0).toLocaleString() : "42,680"}</strong><small>本地索引</small></article><article><span>OpenCLIP 候选</span><strong>{liveMode ? "—" : "5,892"}</strong><small>{liveMode ? "等待模型处理器" : "p ≥ 0.10"}</small></article><article><span>当前阶段</span><strong>{percentage}%</strong><small>{liveMode ? localRun?.stage ?? "项目设置" : "AI 单图审核"}</small></article><article className="attention"><span>需要人工处理</span><strong>{liveMode ? "—" : "426"}</strong><small>{liveMode ? "等待真实候选集" : "不确定与冲突项"}</small></article></div>
+      <div className="metric-strip"><article><span>原始记录</span><strong>{liveMode ? (localProject?.record_count ?? 0).toLocaleString() : "42,680"}</strong><small>本地索引</small></article><article><span>OpenCLIP 候选</span><strong>{liveMode ? (localRun?.candidate_count ?? 0).toLocaleString() : "5,892"}</strong><small>p ≥ {activeThreshold.toFixed(2)}</small></article><article><span>当前阶段</span><strong>{percentage}%</strong><small>{liveMode ? localRun?.stage ?? "项目设置" : "AI 单图审核"}</small></article><article className="attention"><span>需要人工处理</span><strong>{liveMode ? "—" : "426"}</strong><small>{liveMode ? openclipComplete ? "等待 GPT 审核" : "等待真实候选集" : "不确定与冲突项"}</small></article></div>
 
       <div className="overview-grid">
         <section className="run-console panel"><div className="panel-heading"><div><span className="eyebrow">{liveMode ? "ACTIVE RUN · LOCAL" : "ACTIVE RUN · DEMO MIRROR"}</span><h2>{localProject?.name ?? "China Travel Infographics"}</h2></div><span className={`run-state ${visibleRunState}`}>{visibleRunState === "running" ? "运行中" : visibleRunState === "complete" ? "已完成" : "已暂停"}</span></div>
@@ -386,10 +462,23 @@ export default function Home() {
   </section>;
 
   const renderOpenClip = () => {
-    if (liveMode) return <section className="workspace-page"><PageHeading surface="LOCAL" eyebrow="STEP 02 · HIGH RECALL" title="本地模型高召回筛选" description="预处理完成后，需要一个独立的 OpenCLIP 运行环境与分类器模型才能生成真实候选集。" action={<button className="secondary" onClick={() => navigate("preprocess")}>← 返回启动步骤</button>} />
-      <div className={`stage-gate ${preprocessComplete ? "ready" : "waiting"}`}><span>{preprocessComplete ? "✓" : "1"}</span><div><b>{preprocessComplete ? "前期预处理已完成" : "请先完成前期预处理"}</b><p>{preprocessComplete ? `${localRun?.processed.toLocaleString()} 条记录可以进入 OpenCLIP。` : "返回上一步，点击“开始预处理”。"}</p></div>{!preprocessComplete && <button className="primary" onClick={() => navigate("preprocess")}>返回预处理</button>}</div>
-      <section className="model-stack"><div><span className="eyebrow light">NEXT REQUIRED COMPONENT</span><h2>OpenCLIP 执行器 <i>+</i> 分类器模型</h2><p>当前电脑尚未配置 Python ML 环境 · 原始图片仍保留在本地</p></div><div><span>候选阈值</span><strong>p ≥ {threshold.toFixed(2)}</strong><input aria-label="候选阈值" type="range" min="0.05" max="0.9" step="0.05" value={threshold} onChange={(event) => setThreshold(Number(event.target.value))} /></div></section>
-      <section className="next-action-panel panel"><span className="eyebrow">WHY REVIEW IS NOT READY</span><h2>还不能进入人工审核，因为尚未产生真实模型结果</h2><p>接入后，系统会读取这 {localRun?.processed ?? localProject?.record_count ?? 0} 张图片，保存每张图片的概率，并自动把 <b>p ≥ {threshold.toFixed(2)}</b> 的图片送入 AI 单图审核。低分记录只归档，不会被删除。</p><ol><li><span>1</span><div><b>安装隔离的 OpenCLIP 环境</b><small>需要 torch、open_clip_torch 与现有分类器依赖。</small></div></li><li><span>2</span><div><b>选择语言对应的分类器</b><small>你的当前数据需要先确认应使用 EN、ES 还是 JA 模型。</small></div></li><li><span>3</span><div><b>运行模型并生成候选队列</b><small>候选队列生成后，“AI 单图审核”和“人工纠正”才会解锁。</small></div></li></ol><button className="primary" disabled>下一阶段：配置 OpenCLIP 执行器</button></section>
+    if (liveMode) return <section className="workspace-page"><PageHeading surface="LOCAL" eyebrow="STEP 02 · HIGH RECALL" title="本地模型与训练集" description="先选择使用已有模型筛选本次数据，或为下一版模型标注训练图片。两套数据互不混淆。" action={<button className="secondary" onClick={() => navigate("preprocess")}>← 返回预处理</button>} />
+      <div className="model-mode-tabs" role="tablist" aria-label="OpenCLIP 工作模式"><button className={openclipMode === "screen" ? "active" : ""} onClick={() => switchOpenClipMode("screen")}>筛选本次数据</button><button className={openclipMode === "train" ? "active" : ""} onClick={() => switchOpenClipMode("train")}>选择训练图片</button></div>
+      {openclipMode === "screen" ? <>
+        <div className={`stage-gate ${preprocessComplete ? "ready" : "waiting"}`}><span>{preprocessComplete ? "✓" : "1"}</span><div><b>{preprocessComplete ? "前期预处理已完成" : "请先完成前期预处理"}</b><p>{preprocessComplete ? `${localRun?.total.toLocaleString()} 条记录可以进入 OpenCLIP。` : "返回上一步，点击“开始预处理”。"}</p></div>{!preprocessComplete && <button className="primary" onClick={() => navigate("preprocess")}>返回预处理</button>}</div>
+        <section className="model-stack"><div><span className="eyebrow light">ACTIVE MODEL</span><h2>ViT-B/32 <i>→</i> EN Infographic v3</h2><p>{openclipRuntime?.ready ? `运行环境已就绪 · ${openclipRuntime.model_version} · 606 张平衡训练样本` : "正在检查本地运行环境"}</p></div><div><span>本次冻结阈值</span><strong>p ≥ {activeThreshold.toFixed(2)}</strong><small>创建任务后不可修改</small></div></section>
+        <div className="metric-strip compact"><article><span>模型输入</span><strong>{(localRun?.total ?? 0).toLocaleString()}</strong><small>预处理通过</small></article><article><span>已计算</span><strong>{openclipSummary.scored.toLocaleString()}</strong><small>{localRun?.status === "running" ? "正在运行" : "已保存概率"}</small></article><article><span>候选集</span><strong>{openclipSummary.candidates.toLocaleString()}</strong><small>p ≥ {activeThreshold.toFixed(2)}</small></article><article><span>读取失败</span><strong>{openclipSummary.errors.toLocaleString()}</strong><small>不会记为负样本</small></article></div>
+        <section className="next-action-panel panel"><span className="eyebrow">REAL LOCAL RUN</span><h2>{openclipComplete ? "OpenCLIP 筛选已完成" : localRun?.status === "running" ? "正在计算每张图片的概率" : "使用已有 EN v3 模型开始筛选"}</h2><p>{localRun?.message || `模型测试集召回率 ${Math.round((openclipRuntime?.metrics.test_metrics_at_0_60?.recall ?? 0.9) * 100)}%。本次使用 p ≥ ${activeThreshold.toFixed(2)} 的高召回策略，低分图片仅归档，不会被删除。`}</p>
+          {localRun?.status === "running" && <div className="clip-progress"><i><span style={{ width: `${localRun.total ? (localRun.processed / localRun.total) * 100 : 0}%` }} /></i><small>{localRun.processed.toLocaleString()} / {localRun.total.toLocaleString()}</small></div>}
+          {openclipComplete ? <button className="primary" onClick={() => navigate("gpt")}>下一步：配置 AI 单图审核 →</button> : <button className="primary" disabled={!preprocessComplete || !openclipRuntime?.ready || openclipBusy || localRun?.status === "running"} onClick={runOpenClip}>{localRun?.status === "running" ? "OpenCLIP 运行中…" : openclipBusy ? "正在启动…" : "开始 OpenCLIP 筛选"}</button>}
+        </section>
+      </> : <>
+        <section className="training-intro panel"><div><span className="eyebrow">OPTIONAL MODEL LAB</span><h2>为下一版分类器选择训练图片</h2><p>这里的标注不会改变本次筛选结果。建议优先选择模型边界样本和历史误判，并保持“信息图 / 非信息图”数量接近。</p></div><div className="training-counts"><span><b>{trainingPage?.counts.infographic ?? 0}</b> 信息图</span><span><b>{trainingPage?.counts.not_infographic ?? 0}</b> 非信息图</span><span><b>{trainingPage?.counts.uncertain ?? 0}</b> 不确定</span></div></section>
+        {!preprocessComplete ? <div className="stage-gate waiting"><span>1</span><div><b>请先完成预处理</b><p>训练候选也需要稳定记录 ID 和有效图片路径。</p></div><button className="primary" onClick={() => navigate("preprocess")}>返回预处理</button></div> : <section className="panel"><div className="panel-heading"><div><span className="eyebrow">TRAINING CANDIDATE POOL</span><h2>逐张选择训练标签</h2></div><span className="sample-pill">{trainingPage?.total ?? localRun?.total ?? 0} 张可选</span></div>
+          {trainingBusy && !trainingPage ? <p className="training-loading">正在读取本地图片…</p> : <div className="training-grid">{trainingPage?.items.map((candidate) => <article className="training-card" key={candidate.record_id}><div className="training-thumb" role="img" aria-label={candidate.record_id} style={{ backgroundImage: `url("${agentImageUrl(candidate.image_path)}")` }} /><div><b>{candidate.record_id}</b><small>@{candidate.account_name || "unknown"} · {candidate.post_shortcode} #{candidate.image_index}</small><p>{candidate.caption || "无帖文正文"}</p></div><div className="training-actions"><button className={candidate.label === "infographic" ? "selected keep" : ""} onClick={() => setTrainingLabel(candidate, "infographic")}>信息图</button><button className={candidate.label === "not_infographic" ? "selected remove" : ""} onClick={() => setTrainingLabel(candidate, "not_infographic")}>非信息图</button><button className={candidate.label === "uncertain" ? "selected uncertain" : ""} onClick={() => setTrainingLabel(candidate, "uncertain")}>不确定</button></div></article>)}</div>}
+          <div className="training-pager"><button className="secondary" disabled={!trainingPage?.offset || trainingBusy} onClick={() => loadTrainingCandidates(Math.max(0, (trainingPage?.offset ?? 0) - 12))}>← 上一页</button><span>{trainingPage ? `${trainingPage.offset + 1}–${Math.min(trainingPage.offset + trainingPage.limit, trainingPage.total)} / ${trainingPage.total}` : "等待载入"}</span><button className="secondary" disabled={trainingBusy || !trainingPage || trainingPage.offset + trainingPage.limit >= trainingPage.total} onClick={() => loadTrainingCandidates((trainingPage?.offset ?? 0) + 12)}>下一页 →</button></div>
+        </section>}
+      </>}
     </section>;
     return <section className="workspace-page"><PageHeading surface="LOCAL" eyebrow="STEP 02 · HIGH RECALL" title="本地模型高召回筛选" description="OpenCLIP 与自训练分类器运行在电脑后端。阈值只控制候选集，不代表最终信息图判断。" action={<button className="primary" onClick={toggleRun}>{runState === "running" ? "暂停示例" : "运行示例"}</button>} />
       <section className="model-stack"><div><span className="eyebrow light">MODEL STACK</span><h2>ViT-B/32 <i>→</i> StandardScaler <i>→</i> Logistic Regression</h2><p>laion2b_s34b_b79k · infographic classifier v3 · 本地 MPS</p></div><div><span>候选阈值</span><strong>p ≥ {threshold.toFixed(2)}</strong><input aria-label="候选阈值" type="range" min="0.05" max="0.9" step="0.05" value={threshold} onChange={(event) => setThreshold(Number(event.target.value))} /></div></section>
@@ -398,11 +487,14 @@ export default function Home() {
     </section>;
   };
 
-  const renderGpt = () => <section className="workspace-page"><PageHeading surface="API" eyebrow="STEP 03 · AI REVIEW" title="AI 单图审核" description="本地后端将候选图片按结构化 Prompt 调用视觉模型，管理密钥、并发、费用、超时与重试。" action={<button className="primary" onClick={() => navigate("human")}>进入人工纠正 →</button>} />
+  const renderGpt = () => {
+    if (liveMode) return <section className="workspace-page"><PageHeading surface="API" eyebrow="STEP 03 · AI REVIEW" title="AI 单图审核" description="OpenCLIP 候选集将在本地后端逐张调用视觉模型；密钥与原图不会进入公开站点。" action={<button className="secondary" onClick={() => navigate("openclip")}>← 返回 OpenCLIP</button>} /><div className={`stage-gate ${openclipComplete ? "ready" : "waiting"}`}><span>{openclipComplete ? "✓" : "2"}</span><div><b>{openclipComplete ? `${localRun?.candidate_count ?? 0} 张候选已准备好` : "请先完成 OpenCLIP 筛选"}</b><p>{openclipComplete ? "下一步需要配置视觉模型 API、审核 Prompt、并发与费用上限。" : "这里不会显示或使用公开演示数据。"}</p></div>{!openclipComplete && <button className="primary" onClick={() => navigate("openclip")}>返回 OpenCLIP</button>}</div><section className="next-action-panel panel"><span className="eyebrow">NEXT CONNECTOR</span><h2>真实 GPT 审核尚未接入</h2><p>OpenCLIP 的真实概率已经保存；在 API 连接完成前，系统会锁定人工纠正队列，避免把示例判断混入论文数据。</p><button className="primary" disabled>配置本地 API 后解锁</button></section></section>;
+    return <section className="workspace-page"><PageHeading surface="API" eyebrow="STEP 03 · AI REVIEW" title="AI 单图审核" description="本地后端将候选图片按结构化 Prompt 调用视觉模型，管理密钥、并发、费用、超时与重试。" action={<button className="primary" onClick={() => navigate("human")}>进入人工纠正 →</button>} />
     <div className="connector-banner"><div><span className="connector-mark">AI</span><p><b>OpenAI Vision Adapter</b><small>GPT-5.5 snapshot · Prompt infographic_review_v1</small></p></div><span className="connector-state">公开版：已保存结果</span></div>
     <div className="metric-strip compact"><article><span>候选输入</span><strong>5,892</strong><small>仅 p ≥ 0.10</small></article><article><span>已完成</span><strong>{runProgress.toLocaleString()}</strong><small>结构化响应</small></article><article><span>等待中</span><strong>{(5892 - runProgress).toLocaleString()}</strong><small>可暂停和恢复</small></article><article><span>失败待重试</span><strong>11</strong><small>不生成伪判断</small></article></div>
     <section className="panel table-panel"><div className="panel-heading"><div><span className="eyebrow">SAVED SAMPLE RESULTS</span><h2>单图审核结果</h2></div><span className="sample-pill">原始结果不可覆盖</span></div><div className="result-table"><div className="table-head"><span>Record</span><span>CLIP</span><span>语言</span><span>China</span><span>信息图</span><span>AI 判断</span></div>{candidates.map((record) => <div key={record.id}><p><b>{record.id}</b><small>{record.title}</small></p><span>{record.clip.toFixed(2)}</span>{record.criteria.map((value, index) => <span className={value ? "yes" : "no"} key={index}>{value ? "yes" : "no"}</span>)}<em>{record.gpt}</em></div>)}</div></section>
-  </section>;
+    </section>;
+  };
 
   const renderReview = () => reviewRecord ? <section className="review-workspace">
     <aside className="review-sidebar"><div className="review-side-head"><SurfaceBadge value="HUMAN" /><span>{reviewQueue.filter((record) => record[reviewerMode]).length}/{reviewQueue.length}</span></div><h2>{activeView === "human" ? "纠正 AI 判断" : "清理非信息图残留"}</h2><p>{activeView === "human" ? "核对语言、主题和信息图结构；人工判断单独保存。" : "集中清除 poster、photograph 等模型残留。"}</p><div className="queue-list">{reviewQueue.map((record, index) => <button className={index === reviewIndex ? "selected" : ""} onClick={() => setReviewIndex(index)} key={record.id}><span>{record.id}<small>{record.title}</small></span><em>{record[reviewerMode] ? decisionLabel[record[reviewerMode] as Decision] : "待审"}</em></button>)}</div><button className="secondary wide" onClick={() => navigate(activeView === "human" ? "residual" : "c2pa")}>进入下一阶段 →</button></aside>

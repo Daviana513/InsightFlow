@@ -1,0 +1,6 @@
+joblib==1.5.3
+numpy==2.0.2
+open_clip_torch==3.3.0
+pillow==11.3.0
+scikit-learn==1.6.1
+torch==2.8.0
