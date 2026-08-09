@@ -247,6 +247,7 @@ class Handler(BaseHTTPRequestHandler):
         origin = self.allowed_origin()
         if origin:
             self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Private-Network", "true")
             self.send_header("Vary", "Origin")
         self.end_headers()
         self.wfile.write(body)
@@ -264,6 +265,7 @@ class Handler(BaseHTTPRequestHandler):
         origin = self.allowed_origin()
         if origin:
             self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Private-Network", "true")
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
         self.end_headers()
@@ -327,6 +329,7 @@ class Handler(BaseHTTPRequestHandler):
         origin = self.allowed_origin()
         if origin:
             self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Private-Network", "true")
         self.end_headers()
         self.wfile.write(body)
 

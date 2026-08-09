@@ -82,10 +82,9 @@ const initialRecords: ReviewRecord[] = [
 const decisionLabel: Record<Decision, string> = { keep: "保留", remove: "排除", uncertain: "待定" };
 const aiLabel: Record<AiReview, string> = { likely_human: "倾向真人", likely_ai: "倾向 AI", uncertain: "证据不足" };
 const storageKey = "insightflow-workbench-preview-v3";
-const agentUrl = "http://127.0.0.1:8765";
-
 async function agentRequest<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${agentUrl}${path}`, {
+  const host = window.location.hostname === "127.0.0.1" ? "127.0.0.1" : "localhost";
+  const response = await fetch(`http://${host}:8765${path}`, {
     ...init,
     headers: { "Content-Type": "application/json", ...init?.headers },
   });
@@ -136,6 +135,7 @@ export default function Home() {
   const [showProjectSetup, setShowProjectSetup] = useState(false);
   const [isLocalMode, setIsLocalMode] = useState(false);
   const [agentConnected, setAgentConnected] = useState(false);
+  const [agentError, setAgentError] = useState("");
   const [localProject, setLocalProject] = useState<LocalProject | null>(null);
   const [localRun, setLocalRun] = useState<LocalRun | null>(null);
   const [imagesDir, setImagesDir] = useState("");
@@ -175,6 +175,8 @@ export default function Home() {
       try {
         const result = await agentRequest<{ ok: boolean; project: LocalProject | null }>("/health");
         setAgentConnected(result.ok);
+        setAgentError("");
+        setNotice((current) => current.startsWith("这是脱敏交互预览") ? "Local Agent 已连接。现在可以打开真实图片目录与帖文 CSV。" : current);
         if (result.project) {
           setLocalProject(result.project);
           setImagesDir(result.project.images_dir);
@@ -182,8 +184,9 @@ export default function Home() {
           const current = await agentRequest<{ run: LocalRun | null }>("/runs/current");
           setLocalRun(current.run);
         }
-      } catch {
+      } catch (error) {
         setAgentConnected(false);
+        setAgentError(error instanceof Error ? error.message : "无法连接 Local Agent");
       }
     };
     ping();
@@ -347,7 +350,7 @@ export default function Home() {
     return <section className="workspace-page overview-page">
       <div className="overview-hero">
         <div><span className="eyebrow light">LOCAL-FIRST IMAGE SCREENING</span><h1>把一次大规模筛选，<br />变成可恢复的任务。</h1><p>InsightFlow 连接电脑上的图片、模型与第三方 API，让你从一个界面启动流程、追踪异常并完成人工判断。</p><div className="hero-actions"><button className="primary large" onClick={liveMode ? toggleLocalRun : toggleRun}>{liveMode ? localRun?.status === "running" ? "暂停真实任务" : localRun ? "启动真实任务" : "创建真实任务" : runState === "running" ? "暂停示例任务" : runState === "complete" ? "重新运行示例" : "继续示例任务"}</button><button className="dark-secondary" onClick={() => navigate(liveMode ? "preprocess" : "human")}>{liveMode ? "查看数据源与校验 →" : "进入人工待审队列 →"}</button></div></div>
-        <div className="agent-card"><div className="agent-card-head"><span className="agent-icon">LA</span><div><small>LOCAL AGENT</small><strong>{liveMode ? localProject ? `已连接 · ${localProject.name}` : "已连接 · 等待打开项目" : "研究运行器未连接"}</strong></div><span className={`status-dot ${liveMode ? "online" : "offline"}`} /></div><p>{liveMode ? "当前页面只连接本机运行器。目录校验、任务状态与审核记录都会保存在你的电脑中。" : "公开站点只展示脱敏运行镜像。启动本地版后，图片始终留在电脑，界面将显示真实设备、目录和任务状态。"}</p><button onClick={openSetup}>{liveMode ? localProject ? "查看本地项目" : "打开本地项目" : "查看本地研究模式"}</button></div>
+        <div className="agent-card"><div className="agent-card-head"><span className="agent-icon">LA</span><div><small>LOCAL AGENT</small><strong>{liveMode ? localProject ? `已连接 · ${localProject.name}` : "已连接 · 等待打开项目" : isLocalMode ? "本地界面已打开 · 运行器未连接" : "研究运行器未连接"}</strong></div><span className={`status-dot ${liveMode ? "online" : "offline"}`} /></div><p>{liveMode ? "当前页面只连接本机运行器。目录校验、任务状态与审核记录都会保存在你的电脑中。" : isLocalMode ? `页面会每 5 秒重试连接。${agentError ? `错误：${agentError}` : "请确认 Local Agent 仍在运行。"}` : "公开站点只展示脱敏运行镜像。启动本地版后，图片始终留在电脑，界面将显示真实设备、目录和任务状态。"}</p><button onClick={openSetup}>{liveMode ? localProject ? "查看本地项目" : "打开本地项目" : "查看本地研究模式"}</button></div>
       </div>
 
       <div className="metric-strip"><article><span>原始记录</span><strong>{liveMode ? (localProject?.record_count ?? 0).toLocaleString() : "42,680"}</strong><small>本地索引</small></article><article><span>OpenCLIP 候选</span><strong>{liveMode ? "—" : "5,892"}</strong><small>{liveMode ? "等待模型处理器" : "p ≥ 0.10"}</small></article><article><span>当前阶段</span><strong>{percentage}%</strong><small>{liveMode ? localRun?.stage ?? "项目设置" : "AI 单图审核"}</small></article><article className="attention"><span>需要人工处理</span><strong>{liveMode ? "—" : "426"}</strong><small>{liveMode ? "等待真实候选集" : "不确定与冲突项"}</small></article></div>
@@ -411,7 +414,7 @@ export default function Home() {
   };
 
   return <main className="app-shell">
-    <aside className="app-sidebar"><div className="brand"><span className="brand-mark">IF</span><div><strong>InsightFlow</strong><small>LOCAL-FIRST SCREENING</small></div></div><div className="mode-card"><span className={`status-dot ${liveMode ? "online" : "preview"}`} /><div><b>{liveMode ? "Local Research" : "Public Preview"}</b><small>{liveMode ? "真实本地工作区" : "脱敏交互演示"}</small></div></div><nav aria-label="InsightFlow 主导航">{navGroups.map((group) => <div className="nav-group" key={group.label}><span>{group.label}</span>{group.items.map((item) => <button className={activeView === item.id ? "active" : ""} onClick={() => navigate(item.id)} key={item.id}><i />{item.title}{item.id === "human" && <em>426</em>}</button>)}</div>)}</nav><div className="sidebar-agent"><div><span className={`status-dot ${liveMode ? "online" : "offline"}`} /><b>Local Agent</b></div><small>{liveMode ? localProject ? localProject.name : "已连接，等待项目" : "研究运行器未连接"}</small><button onClick={openSetup}>{liveMode ? "打开项目 →" : "如何连接 →"}</button></div></aside>
+    <aside className="app-sidebar"><div className="brand"><span className="brand-mark">IF</span><div><strong>InsightFlow</strong><small>LOCAL-FIRST SCREENING</small></div></div><div className="mode-card"><span className={`status-dot ${liveMode ? "online" : isLocalMode ? "offline" : "preview"}`} /><div><b>{liveMode || isLocalMode ? "Local Research" : "Public Preview"}</b><small>{liveMode ? "真实本地工作区" : isLocalMode ? "正在连接运行器" : "脱敏交互演示"}</small></div></div><nav aria-label="InsightFlow 主导航">{navGroups.map((group) => <div className="nav-group" key={group.label}><span>{group.label}</span>{group.items.map((item) => <button className={activeView === item.id ? "active" : ""} onClick={() => navigate(item.id)} key={item.id}><i />{item.title}{item.id === "human" && <em>426</em>}</button>)}</div>)}</nav><div className="sidebar-agent"><div><span className={`status-dot ${liveMode ? "online" : "offline"}`} /><b>Local Agent</b></div><small>{liveMode ? localProject ? localProject.name : "已连接，等待项目" : isLocalMode ? "连接失败，自动重试中" : "研究运行器未连接"}</small><button onClick={openSetup}>{liveMode ? "打开项目 →" : "如何连接 →"}</button></div></aside>
     <section className="app-main"><header className="app-topbar"><div className="breadcrumb"><span>项目</span><b>{localProject?.name ?? "China Travel Infographics"}</b><em>{localRun ? `${localRun.id} · ${localRun.status}` : "Run 08 · Demo mirror"}</em></div><div className="top-actions"><button className="icon-button" aria-label="查看运行配置" onClick={() => setShowConfig(true)}>⌘</button><button className="secondary" onClick={() => navigate("overview")}>任务总览</button><button className="primary" onClick={liveMode ? toggleLocalRun : toggleRun}>{liveMode ? localRun?.status === "running" ? "暂停真实任务" : localRun ? "启动真实任务" : "创建真实任务" : runState === "running" ? "暂停任务" : "继续任务"}</button></div></header><div className="notice-bar"><span>{notice}</span><button onClick={() => setNotice(liveMode ? "本地研究模式已就绪。" : "脱敏交互预览已就绪。")}>知道了</button></div>{renderContent()}</section>
 
     {showConfig && <Modal title="运行配置快照" eyebrow="RUN CONFIGURATION" onClose={() => setShowConfig(false)}><p>真实运行开始后，规则、模型、Prompt 与阈值会冻结为版本；修改配置将创建新的 Run。</p><dl className="config-list"><div><dt>执行模式</dt><dd>Local-first</dd></div><div><dt>候选阈值</dt><dd>p ≥ {threshold.toFixed(2)}</dd></div><div><dt>本地模型</dt><dd>OpenCLIP + LR v3</dd></div><div><dt>人工阶段</dt><dd>纠正 + 残留 + 风险复核</dd></div><div><dt>保存策略</dt><dd>SQLite + 原始文件哈希</dd></div></dl><button className="primary wide" onClick={exportManifest}>下载示例运行清单</button></Modal>}
