@@ -3,10 +3,24 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent.server import PUBLIC_SITE_ORIGIN, State, inspect_project, trusted_origin
+from agent.server import PUBLIC_SITE_ORIGIN, State, inspect_project, training_readiness, trusted_origin
 
 
 class LocalAgentTest(unittest.TestCase):
+    def test_training_button_gate_requires_both_classes_and_distinct_posts(self):
+        ready = training_readiness(
+            {"infographic": 20, "not_infographic": 20},
+            {"infographic": 5, "not_infographic": 5},
+        )
+        self.assertTrue(ready["ready"])
+        not_ready = training_readiness(
+            {"infographic": 20, "not_infographic": 19},
+            {"infographic": 5, "not_infographic": 4},
+        )
+        self.assertFalse(not_ready["ready"])
+        self.assertEqual(not_ready["missing_images"]["not_infographic"], 1)
+        self.assertEqual(not_ready["missing_posts"]["not_infographic"], 1)
+
     def test_only_local_pages_and_the_official_site_are_trusted(self):
         self.assertEqual(trusted_origin(PUBLIC_SITE_ORIGIN), PUBLIC_SITE_ORIGIN)
         self.assertEqual(trusted_origin("http://localhost:3000"), "http://localhost:3000")
@@ -40,6 +54,7 @@ class LocalAgentTest(unittest.TestCase):
             self.assertTrue(state.save_training_label({"record_id": "1", "label": "infographic"})["saved"])
             candidates = state.list_training_candidates(run["id"])
             self.assertEqual(candidates["items"][0]["label"], "infographic")
+            self.assertFalse(candidates["readiness"]["ready"])
             with state.connect() as db:
                 db.execute(
                     "UPDATE records SET clip_probability = 0.75, clip_status = 'scored' WHERE run_id = ?",

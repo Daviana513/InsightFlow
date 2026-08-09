@@ -23,8 +23,11 @@ PORT = 8765
 PUBLIC_SITE_ORIGIN = "https://insightflow-research.wuyixuan003.chatgpt.site"
 ROOT = Path(__file__).resolve().parents[1]
 OPENCLIP_PYTHON = ROOT / ".venv" / "bin" / "python"
-OPENCLIP_MODEL = ROOT / ".models" / "en_infographic_v3_balanced" / "infographic_classifier.pkl"
-OPENCLIP_METRICS = OPENCLIP_MODEL.with_name("metrics.json")
+MODELS_DIR = ROOT / ".models"
+DEFAULT_MODEL_VERSION = "en_infographic_v3_balanced"
+ACTIVE_MODEL_FILE = MODELS_DIR / "active.json"
+MIN_TRAINING_PER_CLASS = 20
+MIN_TRAINING_POSTS_PER_CLASS = 5
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".tif", ".tiff", ".bmp"}
 FIELD_ALIASES = {
     "record_id": ("record_id", "id", "post_id", "shortcode"),
@@ -48,6 +51,35 @@ def trusted_origin(origin: str | None) -> str | None:
         return None
     host = urlparse(origin).hostname
     return origin if origin == PUBLIC_SITE_ORIGIN or host in {"localhost", "127.0.0.1", "::1"} else None
+
+
+def active_model() -> tuple[str, Path, Path]:
+    version = DEFAULT_MODEL_VERSION
+    if ACTIVE_MODEL_FILE.is_file():
+        try:
+            version = json.loads(ACTIVE_MODEL_FILE.read_text(encoding="utf-8")).get("model_version", version)
+        except (OSError, json.JSONDecodeError):
+            pass
+    if not isinstance(version, str) or not version.replace("_", "").replace("-", "").isalnum():
+        version = DEFAULT_MODEL_VERSION
+    model = MODELS_DIR / version / "infographic_classifier.pkl"
+    if not model.is_file():
+        version = DEFAULT_MODEL_VERSION
+        model = MODELS_DIR / version / "infographic_classifier.pkl"
+    return version, model, model.with_name("metrics.json")
+
+
+def training_readiness(counts: dict[str, int], posts: dict[str, int]) -> dict:
+    missing_images = {label: max(0, MIN_TRAINING_PER_CLASS - counts.get(label, 0)) for label in ("infographic", "not_infographic")}
+    missing_posts = {label: max(0, MIN_TRAINING_POSTS_PER_CLASS - posts.get(label, 0)) for label in ("infographic", "not_infographic")}
+    return {
+        "ready": not any(missing_images.values()) and not any(missing_posts.values()),
+        "minimum_per_class": MIN_TRAINING_PER_CLASS,
+        "recommended_per_class": 100,
+        "minimum_posts_per_class": MIN_TRAINING_POSTS_PER_CLASS,
+        "missing_images": missing_images,
+        "missing_posts": missing_posts,
+    }
 
 
 def resolve_file(images_dir: Path, value: str) -> Path:
@@ -170,6 +202,19 @@ CREATE TABLE IF NOT EXISTS training_labels (
   PRIMARY KEY(project_id, record_id),
   FOREIGN KEY(project_id) REFERENCES projects(id)
 );
+CREATE TABLE IF NOT EXISTS training_jobs (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('running', 'complete', 'failed')),
+  processed INTEGER NOT NULL DEFAULT 0,
+  total INTEGER NOT NULL,
+  model_version TEXT NOT NULL,
+  message TEXT NOT NULL DEFAULT '',
+  metrics_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(project_id) REFERENCES projects(id)
+);
 """
 
 
@@ -196,6 +241,7 @@ class State:
         self.project: dict | None = None
         self.db_path: Path | None = None
         self.active_runs: set[str] = set()
+        self.active_training_jobs: set[str] = set()
 
     def open_project(self, images_dir: str, metadata_csv: str) -> dict:
         project = inspect_project(images_dir, metadata_csv)
@@ -326,15 +372,19 @@ class State:
         }
 
     def openclip_runtime(self) -> dict:
+        version, model_path, metrics_path = active_model()
         metrics = {}
-        if OPENCLIP_METRICS.is_file():
-            metrics = json.loads(OPENCLIP_METRICS.read_text(encoding="utf-8"))
+        if metrics_path.is_file():
+            try:
+                metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                pass
         return {
-            "ready": OPENCLIP_PYTHON.is_file() and OPENCLIP_MODEL.is_file(),
+            "ready": OPENCLIP_PYTHON.is_file() and model_path.is_file(),
             "python_ready": OPENCLIP_PYTHON.is_file(),
-            "model_ready": OPENCLIP_MODEL.is_file(),
-            "model_version": OPENCLIP_MODEL.parent.name,
-            "model_path": str(OPENCLIP_MODEL),
+            "model_ready": model_path.is_file(),
+            "model_version": version,
+            "model_path": str(model_path),
             "metrics": metrics,
         }
 
@@ -391,13 +441,17 @@ class State:
                 message = '正在启动 OpenCLIP', config_json = ?, updated_at = ? WHERE id = ?""",
                 (json.dumps(config, ensure_ascii=False), now(), run_id),
             )
-        threading.Thread(target=self._run_openclip, args=(run_id, manifest), daemon=True).start()
+        threading.Thread(
+            target=self._run_openclip,
+            args=(run_id, manifest, Path(runtime["model_path"])),
+            daemon=True,
+        ).start()
         return self.openclip_summary(run_id)
 
-    def _run_openclip(self, run_id: str, manifest: Path) -> None:
+    def _run_openclip(self, run_id: str, manifest: Path, model_path: Path) -> None:
         command = [
             str(OPENCLIP_PYTHON), str(ROOT / "agent" / "openclip_runner.py"),
-            "--input", str(manifest), "--classifier", str(OPENCLIP_MODEL), "--device", "auto",
+            "--input", str(manifest), "--classifier", str(model_path), "--device", "auto",
         ]
         try:
             process = subprocess.Popen(
@@ -475,11 +529,30 @@ class State:
             total = db.execute(
                 "SELECT COUNT(*) FROM records WHERE run_id = ? AND preprocess_status = 'passed'", (run_id,)
             ).fetchone()[0]
-            counts = {row[0]: row[1] for row in db.execute(
-                "SELECT label, COUNT(*) FROM training_labels WHERE project_id = ? GROUP BY label",
-                (self.project["id"],),
-            ).fetchall()}
-        return {"items": [dict(row) for row in rows], "total": total, "offset": offset, "limit": limit, "counts": counts}
+            counts, posts = self._training_stats(db, run_id)
+        return {
+            "items": [dict(row) for row in rows],
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "counts": counts,
+            "posts": posts,
+            "readiness": training_readiness(counts, posts),
+        }
+
+    def _training_stats(self, db: sqlite3.Connection, run_id: str) -> tuple[dict[str, int], dict[str, int]]:
+        rows = db.execute(
+            """SELECT t.label, COUNT(*) AS image_count,
+            COUNT(DISTINCT CASE WHEN r.post_shortcode != '' THEN r.post_shortcode ELSE r.record_id END) AS post_count
+            FROM records r JOIN training_labels t
+            ON t.project_id = ? AND t.record_id = r.record_id
+            WHERE r.run_id = ? AND r.preprocess_status = 'passed'
+            GROUP BY t.label""",
+            (self.project["id"], run_id),
+        ).fetchall()
+        counts = {row["label"]: int(row["image_count"]) for row in rows}
+        posts = {row["label"]: int(row["post_count"]) for row in rows}
+        return counts, posts
 
     def save_training_label(self, payload: dict) -> dict:
         if not self.project:
@@ -503,6 +576,138 @@ class State:
                 (self.project["id"], payload["record_id"], payload["label"], now()),
             )
         return {"saved": True}
+
+    def get_training_job(self) -> dict | None:
+        if not self.project:
+            raise ValueError("请先打开一个本地项目")
+        with self.lock, self.connect() as db:
+            row = db.execute(
+                "SELECT * FROM training_jobs WHERE project_id = ? ORDER BY created_at DESC LIMIT 1",
+                (self.project["id"],),
+            ).fetchone()
+        if not row:
+            return None
+        job = dict(row)
+        job["metrics"] = json.loads(job.pop("metrics_json") or "{}")
+        return job
+
+    def start_training(self, run_id: str) -> dict:
+        if not self.project:
+            raise ValueError("请先打开一个本地项目")
+        if not OPENCLIP_PYTHON.is_file():
+            raise ValueError("OpenCLIP 独立运行环境尚未准备好")
+        if not self.get_run(run_id):
+            raise ValueError("找不到该任务")
+
+        timestamp = now()
+        job_id = f"train_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:4]}"
+        model_version = f"en_infographic_custom_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{job_id[-4:]}"
+        output_dir = MODELS_DIR / model_version
+        training_dir = Path(self.project["metadata_csv"]).parent / ".insightflow" / "training" / job_id
+        training_dir.mkdir(parents=True, exist_ok=True)
+        manifest = training_dir / "training_manifest.csv"
+
+        with self.lock, self.connect() as db:
+            running = db.execute(
+                "SELECT id FROM training_jobs WHERE project_id = ? AND status = 'running' LIMIT 1",
+                (self.project["id"],),
+            ).fetchone()
+            if running:
+                raise ValueError("已有模型训练正在进行，请等待完成")
+            counts, posts = self._training_stats(db, run_id)
+            readiness = training_readiness(counts, posts)
+            if not readiness["ready"]:
+                raise ValueError("训练样本还未达到最低要求，请继续标注两类图片")
+            rows = db.execute(
+                """SELECT r.record_id, r.image_path,
+                CASE WHEN r.post_shortcode != '' THEN r.post_shortcode ELSE r.record_id END AS post_shortcode,
+                t.label FROM records r JOIN training_labels t
+                ON t.project_id = ? AND t.record_id = r.record_id
+                WHERE r.run_id = ? AND r.preprocess_status = 'passed'
+                AND t.label IN ('infographic', 'not_infographic') ORDER BY r.record_id""",
+                (self.project["id"], run_id),
+            ).fetchall()
+            db.execute(
+                """INSERT INTO training_jobs
+                (id, project_id, status, processed, total, model_version, message, metrics_json, created_at, updated_at)
+                VALUES (?, ?, 'running', 0, ?, ?, '正在准备训练数据', '{}', ?, ?)""",
+                (job_id, self.project["id"], len(rows), model_version, timestamp, timestamp),
+            )
+
+        try:
+            with manifest.open("w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=("record_id", "image_path", "post_shortcode", "label"))
+                writer.writeheader()
+                writer.writerows(dict(row) for row in rows)
+        except OSError as error:
+            with self.lock, self.connect() as db:
+                db.execute(
+                    "UPDATE training_jobs SET status = 'failed', message = ?, updated_at = ? WHERE id = ?",
+                    (f"无法保存训练清单：{error}", now(), job_id),
+                )
+            raise ValueError(f"无法保存训练清单：{error}") from error
+
+        with self.lock:
+            self.active_training_jobs.add(job_id)
+        threading.Thread(
+            target=self._run_training,
+            args=(job_id, manifest, output_dir, model_version),
+            daemon=True,
+        ).start()
+        return self.get_training_job()
+
+    def _run_training(self, job_id: str, manifest: Path, output_dir: Path, model_version: str) -> None:
+        command = [
+            str(OPENCLIP_PYTHON), str(ROOT / "agent" / "train_classifier.py"),
+            "--input", str(manifest), "--output-dir", str(output_dir),
+            "--version", model_version, "--device", "auto",
+        ]
+        last_output = ""
+        try:
+            process = subprocess.Popen(
+                command, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            )
+            assert process.stdout
+            for line in process.stdout:
+                last_output = line.strip()
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if event.get("type") in {"status", "progress"}:
+                    with self.lock, self.connect() as db:
+                        db.execute(
+                            "UPDATE training_jobs SET processed = ?, message = ?, updated_at = ? WHERE id = ?",
+                            (int(event.get("processed", 0)), event.get("message", "正在训练模型"), now(), job_id),
+                        )
+                elif event.get("type") == "complete":
+                    metrics = event.get("metrics", {})
+                    with self.lock, self.connect() as db:
+                        db.execute(
+                            """UPDATE training_jobs SET status = 'complete', processed = total,
+                            message = '训练完成，新模型将在下一次筛选中使用', metrics_json = ?, updated_at = ?
+                            WHERE id = ?""",
+                            (json.dumps(metrics, ensure_ascii=False), now(), job_id),
+                        )
+            return_code = process.wait()
+            if return_code:
+                raise RuntimeError(last_output or f"训练进程退出码 {return_code}")
+            if not (output_dir / "infographic_classifier.pkl").is_file():
+                raise RuntimeError("训练完成但没有生成模型文件")
+            MODELS_DIR.mkdir(exist_ok=True)
+            ACTIVE_MODEL_FILE.write_text(
+                json.dumps({"model_version": model_version, "activated_at": now()}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as error:
+            with self.lock, self.connect() as db:
+                db.execute(
+                    "UPDATE training_jobs SET status = 'failed', message = ?, updated_at = ? WHERE id = ?",
+                    (f"训练失败：{error}", now(), job_id),
+                )
+        finally:
+            with self.lock:
+                self.active_training_jobs.discard(job_id)
 
     def save_review(self, payload: dict) -> dict:
         required = ("run_id", "record_id", "stage", "decision")
@@ -591,6 +796,8 @@ class Handler(BaseHTTPRequestHandler):
                     int(query.get("offset", ["0"])[0]),
                     int(query.get("limit", ["12"])[0]),
                 ))
+            elif parsed.path == "/training/status":
+                self.send_json(200, {"job": STATE.get_training_job()})
             elif parsed.path == "/image":
                 self.send_image(parse_qs(parsed.query).get("path", [""])[0])
             else:
@@ -615,6 +822,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(202, STATE.start_openclip(run_id))
             elif self.path == "/training/labels":
                 self.send_json(200, STATE.save_training_label(payload))
+            elif self.path == "/training/train":
+                self.send_json(202, {"job": STATE.start_training(payload.get("run_id", ""))})
             elif self.path == "/reviews":
                 self.send_json(200, STATE.save_review(payload))
             else:

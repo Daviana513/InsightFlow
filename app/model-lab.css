@@ -60,9 +60,19 @@
 .training-pager { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 16px; }
 .training-pager span { color: var(--muted); font: 600 9px var(--font-geist-mono); }
 .training-loading { padding: 70px 20px; color: var(--muted); text-align: center; }
+.training-gate { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-top: 18px; padding: 18px; border: 1px solid var(--line); border-radius: 10px; background: #f7f9f7; }
+.training-gate.ready { border-color: #a5c9b7; background: #eff8f2; }
+.training-gate.running { border-color: #c3d4ca; background: #f3f7f4; }
+.training-gate > div { flex: 1; }
+.training-gate h3 { margin: 6px 0; font-size: 15px; }
+.training-gate p { margin: 0; color: var(--muted); font-size: 9px; line-height: 1.55; }
+.training-gate .clip-progress { max-width: 540px; margin-bottom: 0; }
+.training-result { margin-top: 7px !important; color: var(--green) !important; font-weight: 650; }
+.training-error { margin-top: 7px !important; color: var(--red) !important; }
 
 @media (max-width: 780px) {
   .training-intro { align-items: flex-start; flex-direction: column; }
   .training-counts { width: 100%; overflow-x: auto; }
   .training-grid { grid-template-columns: 1fr; }
+  .training-gate { align-items: stretch; flex-direction: column; }
 }

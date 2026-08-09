@@ -42,7 +42,16 @@ type OpenClipRuntime = {
 type OpenClipSummary = { scored: number; candidates: number; below_threshold: number; errors: number };
 type TrainingLabel = "infographic" | "not_infographic" | "uncertain";
 type TrainingCandidate = { record_id: string; image_path: string; caption: string; account_name: string; post_shortcode: string; image_index: string; label: TrainingLabel | null };
-type TrainingPage = { items: TrainingCandidate[]; total: number; offset: number; limit: number; counts: Partial<Record<TrainingLabel, number>> };
+type TrainingReadiness = {
+  ready: boolean;
+  minimum_per_class: number;
+  recommended_per_class: number;
+  minimum_posts_per_class: number;
+  missing_images: Record<"infographic" | "not_infographic", number>;
+  missing_posts: Record<"infographic" | "not_infographic", number>;
+};
+type TrainingPage = { items: TrainingCandidate[]; total: number; offset: number; limit: number; counts: Partial<Record<TrainingLabel, number>>; posts: Partial<Record<TrainingLabel, number>>; readiness: TrainingReadiness };
+type TrainingJob = { id: string; status: "running" | "complete" | "failed"; processed: number; total: number; model_version: string; message: string; metrics: { test_metrics_at_0_50?: { accuracy?: number; f1?: number } } };
 
 type ReviewRecord = {
   id: string;
@@ -167,6 +176,8 @@ export default function Home() {
   const [openclipMode, setOpenclipMode] = useState<"screen" | "train">("screen");
   const [trainingPage, setTrainingPage] = useState<TrainingPage | null>(null);
   const [trainingBusy, setTrainingBusy] = useState(false);
+  const [trainingJob, setTrainingJob] = useState<TrainingJob | null>(null);
+  const [trainingStartBusy, setTrainingStartBusy] = useState(false);
   const [setupError, setSetupError] = useState("");
   const [notice, setNotice] = useState("这是脱敏交互预览。真实研究数据由电脑上的 Local Agent 处理，不会上传到此站点。");
 
@@ -211,6 +222,8 @@ export default function Home() {
           setLocalRun(current.run);
           const runtime = await agentRequest<OpenClipRuntime>("/models/openclip");
           setOpenclipRuntime(runtime);
+          const training = await agentRequest<{ job: TrainingJob | null }>("/training/status");
+          setTrainingJob(training.job);
           if (current.run && current.run.stage !== "preprocess") {
             const clip = await agentRequest<{ run: LocalRun; summary: OpenClipSummary }>(`/runs/${current.run.id}/openclip`);
             setLocalRun(clip.run);
@@ -391,6 +404,23 @@ export default function Home() {
     }
   };
 
+  const startTrainingModel = async () => {
+    if (!localRun) return;
+    setTrainingStartBusy(true);
+    try {
+      const result = await agentRequest<{ job: TrainingJob }>("/training/train", {
+        method: "POST",
+        body: JSON.stringify({ run_id: localRun.id }),
+      });
+      setTrainingJob(result.job);
+      setNotice("新模型已开始在电脑本地训练。可以离开此页面，进度会自动保存和刷新。");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法开始模型训练");
+    } finally {
+      setTrainingStartBusy(false);
+    }
+  };
+
   const switchOpenClipMode = (mode: "screen" | "train") => {
     setOpenclipMode(mode);
     if (mode === "train" && !trainingPage) void loadTrainingCandidates();
@@ -467,7 +497,7 @@ export default function Home() {
       <div className="model-mode-tabs" role="tablist" aria-label="OpenCLIP 工作模式"><button className={openclipMode === "screen" ? "active" : ""} onClick={() => switchOpenClipMode("screen")}>筛选本次数据</button><button className={openclipMode === "train" ? "active" : ""} onClick={() => switchOpenClipMode("train")}>选择训练图片</button></div>
       {openclipMode === "screen" ? <>
         <div className={`stage-gate ${preprocessComplete ? "ready" : "waiting"}`}><span>{preprocessComplete ? "✓" : "1"}</span><div><b>{preprocessComplete ? "前期预处理已完成" : "请先完成前期预处理"}</b><p>{preprocessComplete ? `${localRun?.total.toLocaleString()} 条记录可以进入 OpenCLIP。` : "返回上一步，点击“开始预处理”。"}</p></div>{!preprocessComplete && <button className="primary" onClick={() => navigate("preprocess")}>返回预处理</button>}</div>
-        <section className="model-stack"><div><span className="eyebrow light">ACTIVE MODEL</span><h2>ViT-B/32 <i>→</i> EN Infographic v3</h2><p>{openclipRuntime?.ready ? `运行环境已就绪 · ${openclipRuntime.model_version} · 606 张平衡训练样本` : "正在检查本地运行环境"}</p></div><div><span>本次冻结阈值</span><strong>p ≥ {activeThreshold.toFixed(2)}</strong><small>创建任务后不可修改</small></div></section>
+        <section className="model-stack"><div><span className="eyebrow light">ACTIVE MODEL</span><h2>ViT-B/32 <i>→</i> {openclipRuntime?.model_version ?? "Infographic classifier"}</h2><p>{openclipRuntime?.ready ? `运行环境已就绪 · ${openclipRuntime.metrics.sample_counts?.labeled_images ?? "本地"} 张训练样本` : "正在检查本地运行环境"}</p></div><div><span>本次冻结阈值</span><strong>p ≥ {activeThreshold.toFixed(2)}</strong><small>创建任务后不可修改</small></div></section>
         <div className="metric-strip compact"><article><span>模型输入</span><strong>{(localRun?.total ?? 0).toLocaleString()}</strong><small>预处理通过</small></article><article><span>已计算</span><strong>{openclipSummary.scored.toLocaleString()}</strong><small>{localRun?.status === "running" ? "正在运行" : "已保存概率"}</small></article><article><span>候选集</span><strong>{openclipSummary.candidates.toLocaleString()}</strong><small>p ≥ {activeThreshold.toFixed(2)}</small></article><article><span>读取失败</span><strong>{openclipSummary.errors.toLocaleString()}</strong><small>不会记为负样本</small></article></div>
         <section className="next-action-panel panel"><span className="eyebrow">REAL LOCAL RUN</span><h2>{openclipComplete ? "OpenCLIP 筛选已完成" : localRun?.status === "running" ? "正在计算每张图片的概率" : "使用已有 EN v3 模型开始筛选"}</h2><p>{localRun?.message || `模型测试集召回率 ${Math.round((openclipRuntime?.metrics.test_metrics_at_0_60?.recall ?? 0.9) * 100)}%。本次使用 p ≥ ${activeThreshold.toFixed(2)} 的高召回策略，低分图片仅归档，不会被删除。`}</p>
           {localRun?.status === "running" && <div className="clip-progress"><i><span style={{ width: `${localRun.total ? (localRun.processed / localRun.total) * 100 : 0}%` }} /></i><small>{localRun.processed.toLocaleString()} / {localRun.total.toLocaleString()}</small></div>}
@@ -478,6 +508,7 @@ export default function Home() {
         {!preprocessComplete ? <div className="stage-gate waiting"><span>1</span><div><b>请先完成预处理</b><p>训练候选也需要稳定记录 ID 和有效图片路径。</p></div><button className="primary" onClick={() => navigate("preprocess")}>返回预处理</button></div> : <section className="panel"><div className="panel-heading"><div><span className="eyebrow">TRAINING CANDIDATE POOL</span><h2>逐张选择训练标签</h2></div><span className="sample-pill">{trainingPage?.total ?? localRun?.total ?? 0} 张可选</span></div>
           {trainingBusy && !trainingPage ? <p className="training-loading">正在读取本地图片…</p> : <div className="training-grid">{trainingPage?.items.map((candidate) => <article className="training-card" key={candidate.record_id}><div className="training-thumb" role="img" aria-label={candidate.record_id} style={{ backgroundImage: `url("${agentImageUrl(candidate.image_path)}")` }} /><div><b>{candidate.record_id}</b><small>@{candidate.account_name || "unknown"} · {candidate.post_shortcode} #{candidate.image_index}</small><p>{candidate.caption || "无帖文正文"}</p></div><div className="training-actions"><button className={candidate.label === "infographic" ? "selected keep" : ""} onClick={() => setTrainingLabel(candidate, "infographic")}>信息图</button><button className={candidate.label === "not_infographic" ? "selected remove" : ""} onClick={() => setTrainingLabel(candidate, "not_infographic")}>非信息图</button><button className={candidate.label === "uncertain" ? "selected uncertain" : ""} onClick={() => setTrainingLabel(candidate, "uncertain")}>不确定</button></div></article>)}</div>}
           <div className="training-pager"><button className="secondary" disabled={!trainingPage?.offset || trainingBusy} onClick={() => loadTrainingCandidates(Math.max(0, (trainingPage?.offset ?? 0) - 12))}>← 上一页</button><span>{trainingPage ? `${trainingPage.offset + 1}–${Math.min(trainingPage.offset + trainingPage.limit, trainingPage.total)} / ${trainingPage.total}` : "等待载入"}</span><button className="secondary" disabled={trainingBusy || !trainingPage || trainingPage.offset + trainingPage.limit >= trainingPage.total} onClick={() => loadTrainingCandidates((trainingPage?.offset ?? 0) + 12)}>下一页 →</button></div>
+          {trainingJob?.status === "running" ? <div className="training-gate running"><div><span className="eyebrow">MODEL TRAINING</span><h3>正在训练 {trainingJob.model_version}</h3><p>{trainingJob.message}</p><div className="clip-progress"><i><span style={{ width: `${trainingJob.total ? (trainingJob.processed / trainingJob.total) * 100 : 0}%` }} /></i><small>{trainingJob.processed} / {trainingJob.total} 张图片</small></div></div></div> : <div className={`training-gate ${trainingPage?.readiness.ready ? "ready" : "waiting"}`}><div><span className="eyebrow">TRAINING GATE</span><h3>{trainingPage?.readiness.ready ? "训练集已达到可运行下限" : "继续选择图片，达到门槛后出现训练按钮"}</h3>{trainingPage && !trainingPage.readiness.ready ? <p>还需：信息图 {trainingPage.readiness.missing_images.infographic} 张、非信息图 {trainingPage.readiness.missing_images.not_infographic} 张；每类还需覆盖 {trainingPage.readiness.missing_posts.infographic} / {trainingPage.readiness.missing_posts.not_infographic} 个不同帖子。</p> : <p>当前可训练；正式研究建议继续扩充到每类至少 {trainingPage?.readiness.recommended_per_class ?? 100} 张。</p>}{trainingJob?.status === "complete" && <p className="training-result">上次训练已完成：{trainingJob.model_version}。下一次 OpenCLIP 筛选会自动使用它。</p>}{trainingJob?.status === "failed" && <p className="training-error">{trainingJob.message}</p>}</div>{trainingPage?.readiness.ready && <button className="primary" disabled={trainingStartBusy} onClick={startTrainingModel}>{trainingStartBusy ? "正在启动…" : `训练新模型（${(trainingPage.counts.infographic ?? 0) + (trainingPage.counts.not_infographic ?? 0)} 张）`}</button>}</div>}
         </section>}
       </>}
     </section>;
