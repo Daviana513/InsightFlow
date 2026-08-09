@@ -33,6 +33,22 @@ class LocalAgentTest(unittest.TestCase):
                 "run_id": run["id"], "record_id": "1", "stage": "human", "decision": "keep"
             })["saved"])
 
+    def test_instagram_carousel_fields_form_a_stable_record_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            images = root / "images"
+            images.mkdir()
+            (images / "slide.jpg").write_bytes(b"sample")
+            metadata = root / "source.csv"
+            with metadata.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["post_shortcode", "image_index", "image_path"])
+                writer.writeheader()
+                writer.writerow({"post_shortcode": "ABC123", "image_index": "2", "image_path": "slide.jpg"})
+
+            inspected = inspect_project(str(images), str(metadata))
+            self.assertTrue(inspected["ready"])
+            self.assertEqual(inspected["mapping"]["record_id"], "post_shortcode + image_index")
+
 
 if __name__ == "__main__":
     unittest.main()

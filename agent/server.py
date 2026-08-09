@@ -59,6 +59,8 @@ def inspect_project(images_value: str, metadata_value: str) -> dict:
             key: next((lowered[alias] for alias in aliases if alias in lowered), None)
             for key, aliases in FIELD_ALIASES.items()
         }
+        if not mapping["record_id"] and "post_shortcode" in lowered and "image_index" in lowered:
+            mapping["record_id"] = f"{lowered['post_shortcode']} + {lowered['image_index']}"
         record_count = 0
         missing_images = 0
         image_field = mapping["image_path"]
