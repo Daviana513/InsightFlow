@@ -28,6 +28,9 @@ class LocalAgentTest(unittest.TestCase):
             state.open_project(str(images), str(metadata))
             run = state.create_run(0.1)
             self.assertEqual(run["status"], "ready")
+            preprocessed = state.preprocess_run(run["id"])
+            self.assertEqual(preprocessed["run"]["stage"], "openclip")
+            self.assertEqual(preprocessed["summary"]["passed"], 1)
             self.assertEqual(state.update_run(run["id"], "running")["status"], "running")
             self.assertTrue(state.save_review({
                 "run_id": run["id"], "record_id": "1", "stage": "human", "decision": "keep"

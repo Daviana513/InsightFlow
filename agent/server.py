@@ -130,6 +130,20 @@ CREATE TABLE IF NOT EXISTS reviews (
   PRIMARY KEY(run_id, record_id, stage),
   FOREIGN KEY(run_id) REFERENCES runs(id)
 );
+CREATE TABLE IF NOT EXISTS records (
+  run_id TEXT NOT NULL,
+  record_id TEXT NOT NULL,
+  image_path TEXT NOT NULL,
+  post_shortcode TEXT NOT NULL DEFAULT '',
+  image_index TEXT NOT NULL DEFAULT '',
+  caption TEXT NOT NULL DEFAULT '',
+  account_name TEXT NOT NULL DEFAULT '',
+  language TEXT NOT NULL DEFAULT '',
+  preprocess_status TEXT NOT NULL CHECK(preprocess_status IN ('passed', 'image_missing')),
+  preprocess_reason TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY(run_id, record_id),
+  FOREIGN KEY(run_id) REFERENCES runs(id)
+);
 """
 
 
@@ -201,6 +215,63 @@ class State:
         if not changed:
             raise ValueError("找不到该任务")
         return self.get_run(run_id)
+
+    def preprocess_run(self, run_id: str) -> dict:
+        if not self.project:
+            raise ValueError("请先打开一个本地项目")
+        run = self.get_run(run_id)
+        if not run:
+            raise ValueError("找不到该任务")
+        if run["stage"] != "preprocess":
+            return {"run": run, "summary": {"already_complete": True}}
+
+        metadata_csv = Path(self.project["metadata_csv"])
+        images_dir = Path(self.project["images_dir"])
+        mapping = self.project["mapping"]
+        records = []
+        seen = set()
+        with metadata_csv.open("r", encoding="utf-8-sig", newline="") as handle:
+            for row in csv.DictReader(handle):
+                id_mapping = mapping["record_id"]
+                if " + " in id_mapping:
+                    fields = id_mapping.split(" + ")
+                    record_id = "#".join((row.get(field) or "").strip() for field in fields)
+                else:
+                    record_id = (row.get(id_mapping) or "").strip()
+                if not record_id or record_id in seen:
+                    raise ValueError("稳定记录 ID 为空或重复，请检查 post_shortcode 与 image_index")
+                seen.add(record_id)
+
+                image_value = (row.get(mapping["image_path"]) or "").strip()
+                image_path = resolve_file(images_dir, image_value)
+                if not image_path.is_file():
+                    image_path = resolve_file(metadata_csv.parent, image_value)
+                readable = image_path.is_file()
+                records.append((
+                    run_id, record_id, str(image_path), (row.get("post_shortcode") or "").strip(),
+                    (row.get("image_index") or "").strip(),
+                    (row.get(mapping.get("caption") or "") or "").strip(),
+                    (row.get(mapping.get("account") or "") or "").strip(),
+                    (row.get(mapping.get("language") or "") or "").strip(),
+                    "passed" if readable else "image_missing",
+                    "基础字段与图片已验证" if readable else "找不到对应图片",
+                ))
+
+        passed = sum(record[8] == "passed" for record in records)
+        timestamp = now()
+        with self.lock, self.connect() as db:
+            db.execute("DELETE FROM records WHERE run_id = ?", (run_id,))
+            db.executemany(
+                "INSERT INTO records VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", records
+            )
+            db.execute(
+                "UPDATE runs SET status = 'paused', stage = 'openclip', processed = ?, total = ?, updated_at = ? WHERE id = ?",
+                (len(records), len(records), timestamp, run_id),
+            )
+        return {
+            "run": self.get_run(run_id),
+            "summary": {"total": len(records), "passed": passed, "image_missing": len(records) - passed},
+        }
 
     def save_review(self, payload: dict) -> dict:
         required = ("run_id", "record_id", "stage", "decision")
@@ -297,6 +368,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, {"project": STATE.open_project(payload.get("images_dir", ""), payload.get("metadata_csv", ""))})
             elif self.path == "/runs":
                 self.send_json(201, {"run": STATE.create_run(float(payload.get("threshold", 0.1)))})
+            elif self.path.startswith("/runs/") and self.path.endswith("/preprocess"):
+                run_id = self.path.strip("/").split("/")[1]
+                self.send_json(200, STATE.preprocess_run(run_id))
             elif self.path == "/reviews":
                 self.send_json(200, STATE.save_review(payload))
             else:

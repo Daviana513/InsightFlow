@@ -141,6 +141,7 @@ export default function Home() {
   const [imagesDir, setImagesDir] = useState("");
   const [metadataCsv, setMetadataCsv] = useState("");
   const [setupBusy, setSetupBusy] = useState(false);
+  const [preprocessBusy, setPreprocessBusy] = useState(false);
   const [setupError, setSetupError] = useState("");
   const [notice, setNotice] = useState("这是脱敏交互预览。真实研究数据由电脑上的 Local Agent 处理，不会上传到此站点。");
 
@@ -302,19 +303,21 @@ export default function Home() {
     }
   };
 
-  const toggleLocalRun = async () => {
+  const runPreprocess = async () => {
     if (!localRun) return setShowProjectSetup(true);
-    const status = localRun.status === "running" ? "paused" : "running";
+    setPreprocessBusy(true);
     try {
-      const result = await agentRequest<{ run: LocalRun }>(`/runs/${localRun.id}/status`, {
-        method: "PATCH",
-        body: JSON.stringify({ status }),
+      const result = await agentRequest<{ run: LocalRun; summary: { total?: number; passed?: number; image_missing?: number } }>(`/runs/${localRun.id}/preprocess`, {
+        method: "POST",
+        body: "{}",
       });
       setLocalRun(result.run);
-      setNotice(status === "running" ? "真实任务已启动。当前版本会保存任务状态；处理器将在下一阶段接入。" : "真实任务已暂停，进度已保存。即使关闭页面也不会丢失。"
-      );
+      setNotice(`预处理完成：${result.summary.passed ?? result.run.processed} 条通过，${result.summary.image_missing ?? 0} 条缺图。下一步是配置 OpenCLIP。`);
+      navigate("openclip");
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "任务状态更新失败");
+      setNotice(error instanceof Error ? error.message : "预处理失败");
+    } finally {
+      setPreprocessBusy(false);
     }
   };
 
@@ -332,6 +335,9 @@ export default function Home() {
 
   const liveMode = isLocalMode && agentConnected;
   const openSetup = () => liveMode ? setShowProjectSetup(true) : setShowLocalHelp(true);
+  const preprocessComplete = Boolean(localRun && localRun.stage !== "preprocess");
+  const localPrimaryLabel = !localProject ? "打开真实项目" : !localRun ? "创建真实任务" : !preprocessComplete ? preprocessBusy ? "正在预处理…" : "开始预处理" : "进入 OpenCLIP";
+  const localPrimaryAction = () => !localProject || !localRun ? setShowProjectSetup(true) : !preprocessComplete ? runPreprocess() : navigate("openclip");
 
   const renderOverview = () => {
     const total = liveMode ? localRun?.total ?? localProject?.record_count ?? 0 : 5892;
@@ -349,7 +355,7 @@ export default function Home() {
     ];
     return <section className="workspace-page overview-page">
       <div className="overview-hero">
-        <div><span className="eyebrow light">LOCAL-FIRST IMAGE SCREENING</span><h1>把一次大规模筛选，<br />变成可恢复的任务。</h1><p>InsightFlow 连接电脑上的图片、模型与第三方 API，让你从一个界面启动流程、追踪异常并完成人工判断。</p><div className="hero-actions"><button className="primary large" onClick={liveMode ? toggleLocalRun : toggleRun}>{liveMode ? localRun?.status === "running" ? "暂停真实任务" : localRun ? "启动真实任务" : "创建真实任务" : runState === "running" ? "暂停示例任务" : runState === "complete" ? "重新运行示例" : "继续示例任务"}</button><button className="dark-secondary" onClick={() => navigate(liveMode ? "preprocess" : "human")}>{liveMode ? "查看数据源与校验 →" : "进入人工待审队列 →"}</button></div></div>
+        <div><span className="eyebrow light">LOCAL-FIRST IMAGE SCREENING</span><h1>把一次大规模筛选，<br />变成可恢复的任务。</h1><p>InsightFlow 连接电脑上的图片、模型与第三方 API，让你从一个界面启动流程、追踪异常并完成人工判断。</p><div className="hero-actions"><button className="primary large" disabled={preprocessBusy} onClick={liveMode ? localPrimaryAction : toggleRun}>{liveMode ? localPrimaryLabel : runState === "running" ? "暂停示例任务" : runState === "complete" ? "重新运行示例" : "继续示例任务"}</button><button className="dark-secondary" onClick={() => navigate(liveMode ? "preprocess" : "human")}>{liveMode ? "查看启动步骤 →" : "进入人工待审队列 →"}</button></div></div>
         <div className="agent-card"><div className="agent-card-head"><span className="agent-icon">LA</span><div><small>LOCAL AGENT</small><strong>{liveMode ? localProject ? `已连接 · ${localProject.name}` : "已连接 · 等待打开项目" : isLocalMode ? "本地界面已打开 · 运行器未连接" : "研究运行器未连接"}</strong></div><span className={`status-dot ${liveMode ? "online" : "offline"}`} /></div><p>{liveMode ? "当前页面只连接本机运行器。目录校验、任务状态与审核记录都会保存在你的电脑中。" : isLocalMode ? `页面会每 5 秒重试连接。${agentError ? `错误：${agentError}` : "请确认 Local Agent 仍在运行。"}` : "公开站点只展示脱敏运行镜像。启动本地版后，图片始终留在电脑，界面将显示真实设备、目录和任务状态。"}</p><button onClick={openSetup}>{liveMode ? localProject ? "查看本地项目" : "打开本地项目" : "查看本地研究模式"}</button></div>
       </div>
 
@@ -371,18 +377,26 @@ export default function Home() {
     </section>;
   };
 
-  const renderPreprocess = () => <section className="workspace-page"><PageHeading surface="LOCAL" eyebrow="STEP 01 · DATA SOURCE" title="数据源与前期预处理" description="真实模式直接索引电脑上的图片和帖文主表，不把海量原始文件上传到网页。" action={<button className="primary" onClick={openSetup}>{liveMode ? localProject ? "更换本地项目" : "打开本地项目" : "连接 Local Agent"}</button>} />
+  const renderPreprocess = () => <section className="workspace-page"><PageHeading surface="LOCAL" eyebrow="STEP 01 · DATA SOURCE" title="数据源与前期预处理" description="按顺序完成下面三步。预处理结束后，系统会直接带你进入 OpenCLIP 阶段。" action={<button className="secondary" onClick={openSetup}>{liveMode ? localProject ? "更换数据源" : "打开本地项目" : "连接 Local Agent"}</button>} />
+    {liveMode && <section className="launch-flow" aria-label="开始真实筛选"><article className={localProject ? "done" : "current"}><span>1</span><div><b>打开数据源</b><small>{localProject ? `${localProject.record_count.toLocaleString()} 条记录已通过字段检查` : "选择图片文件夹与帖文 CSV"}</small></div><em>{localProject ? "已完成" : "当前步骤"}</em></article><article className={localRun ? "done" : localProject ? "current" : "locked"}><span>2</span><div><b>创建本次任务</b><small>{localRun ? localRun.id : "冻结阈值与字段映射，保存可恢复进度"}</small></div><em>{localRun ? "已完成" : localProject ? "下一步" : "等待"}</em></article><article className={preprocessComplete ? "done" : localRun ? "current" : "locked"}><span>3</span><div><b>运行前期预处理</b><small>{preprocessComplete ? `${localRun?.processed.toLocaleString()} 条记录已建立稳定索引` : "验证每条记录、图片路径与唯一 ID"}</small></div><em>{preprocessComplete ? "已完成" : localRun ? "可以开始" : "等待"}</em></article><button className="primary" disabled={preprocessBusy} onClick={localPrimaryAction}>{localPrimaryLabel} →</button></section>}
     <div className="local-banner"><span className="agent-icon">LA</span><div><b>{liveMode ? localProject ? "本地项目已通过基础校验" : "Local Agent 已连接，请打开项目" : "研究数据应由本地后端读取"}</b><p>{liveMode ? localProject ? `${localProject.metadata_csv} · 数据不会上传` : "填写图片目录和 CSV 路径后，运行器会先检查字段与缺图。" : "公开预览仅展示字段与规则。连接后可选择项目目录、扫描图片、映射字段并运行现有脚本。"}</p></div><span className={`connection-pill ${liveMode ? "connected" : ""}`}>{liveMode ? "已连接" : "未连接"}</span></div>
     <div className="three-grid"><article className="source-card panel"><span className="eyebrow">IMAGE SOURCE</span><h3>本地图片目录</h3><strong>{(localProject?.image_count ?? 42534).toLocaleString()}</strong><p>{localProject ? localProject.images_dir : "images / en · es · ja"}</p><small>原图不进入在线站点</small></article><article className="source-card panel"><span className="eyebrow">METADATA</span><h3>帖文主表</h3><strong>{(localProject?.record_count ?? 42680).toLocaleString()}</strong><p>{localProject ? localProject.metadata_csv : "source_master.csv"}</p><small>{localProject ? `${localProject.missing_images} 条缺图` : "29 个字段 · 146 条缺图"}</small></article><article className="source-card panel"><span className="eyebrow">TASK STATE</span><h3>真实任务</h3><strong>{localRun ? localRun.status.toUpperCase() : "—"}</strong><p>{localRun?.id ?? "尚未创建"}</p><small>SQLite 自动保存</small></article></div>
     <div className="two-grid"><section className="panel"><div className="panel-heading"><div><span className="eyebrow">FIELD MAPPING</span><h2>字段映射预检</h2></div><span className="check-label">{localProject ? localProject.ready ? "必要字段已匹配" : "需要补充字段" : "DEMO MAPPING"}</span></div><div className="mapping-list">{[["稳定记录 ID", "record_id"], ["图片路径", "image_path"], ["帖文正文", "caption"], ["语言", "language"], ["账号信息", "account"]].map(([label, key]) => { const field = localProject?.mapping[key]; return <div key={key}><b>{label}</b><code>{field ?? key}</code><span>{localProject ? field ? "已匹配" : "未找到" : "示例"}</span></div>; })}</div>{localProject?.warnings.map((warning) => <p className="field-warning" key={warning}>{warning}</p>)}</section>
-      <section className="panel"><div className="panel-heading"><div><span className="eyebrow">PREPROCESS RULES</span><h2>本次运行规则</h2></div><button className="text-button" onClick={() => setShowConfig(true)}>查看快照</button></div><div className="rule-list">{[["研究范围与时间", "仅保留目标国家、年份与语言"], ["帖文相关性", "根据 caption、tags 与来源字段筛选"], ["图片与轮播去重", "按哈希和 canonical record 合并"], ["缺失数据隔离", "不把读取失败当作规则排除"]].map(([title, desc]) => <div key={title}><span>✓</span><p><b>{title}</b><small>{desc}</small></p></div>)}</div><button className="secondary wide" onClick={() => navigate("openclip")}>查看本地模型阶段 →</button></section></div>
+      <section className="panel"><div className="panel-heading"><div><span className="eyebrow">PREPROCESS RULES</span><h2>本次运行规则</h2></div><button className="text-button" onClick={() => setShowConfig(true)}>查看快照</button></div><div className="rule-list">{[["研究范围与时间", "仅保留目标国家、年份与语言"], ["帖文相关性", "根据 caption、tags 与来源字段筛选"], ["图片与轮播去重", "按哈希和 canonical record 合并"], ["缺失数据隔离", "不把读取失败当作规则排除"]].map(([title, desc]) => <div key={title}><span>✓</span><p><b>{title}</b><small>{desc}</small></p></div>)}</div><button className="primary wide" disabled={preprocessBusy} onClick={liveMode ? localPrimaryAction : () => navigate("openclip")}>{liveMode ? localPrimaryLabel : "查看本地模型阶段"} →</button></section></div>
   </section>;
 
-  const renderOpenClip = () => <section className="workspace-page"><PageHeading surface="LOCAL" eyebrow="STEP 02 · HIGH RECALL" title="本地模型高召回筛选" description="OpenCLIP 与自训练分类器运行在电脑后端。阈值只控制候选集，不代表最终信息图判断。" action={<button className="primary" onClick={toggleRun}>{runState === "running" ? "暂停示例" : "运行示例"}</button>} />
-    <section className="model-stack"><div><span className="eyebrow light">MODEL STACK</span><h2>ViT-B/32 <i>→</i> StandardScaler <i>→</i> Logistic Regression</h2><p>laion2b_s34b_b79k · infographic classifier v3 · 本地 MPS</p></div><div><span>候选阈值</span><strong>p ≥ {threshold.toFixed(2)}</strong><input aria-label="候选阈值" type="range" min="0.05" max="0.9" step="0.05" value={threshold} onChange={(event) => setThreshold(Number(event.target.value))} /></div></section>
-    <div className="metric-strip compact"><article><span>模型输入</span><strong>42,534</strong><small>预处理通过</small></article><article><span>候选集</span><strong>5,892</strong><small>进入 AI 审核</small></article><article><span>低于阈值</span><strong>36,642</strong><small>保留审计记录</small></article><article><span>读取失败</span><strong>17</strong><small>单独重试</small></article></div>
-    <section className="panel"><div className="panel-heading"><div><span className="eyebrow">INTERACTIVE SAMPLE</span><h2>候选分数预览</h2></div><span className="sample-pill">6 条脱敏样例</span></div><div className="score-list">{records.map((record) => <div key={record.id}><p><b>{record.id}</b><small>{record.title}</small></p><div><i style={{ width: `${record.clip * 100}%` }} /></div><em>{record.clip.toFixed(2)}</em><span className={record.clip >= threshold ? "pass" : "fail"}>{record.clip >= threshold ? "进入" : "排除"}</span></div>)}</div></section>
-  </section>;
+  const renderOpenClip = () => {
+    if (liveMode) return <section className="workspace-page"><PageHeading surface="LOCAL" eyebrow="STEP 02 · HIGH RECALL" title="本地模型高召回筛选" description="预处理完成后，需要一个独立的 OpenCLIP 运行环境与分类器模型才能生成真实候选集。" action={<button className="secondary" onClick={() => navigate("preprocess")}>← 返回启动步骤</button>} />
+      <div className={`stage-gate ${preprocessComplete ? "ready" : "waiting"}`}><span>{preprocessComplete ? "✓" : "1"}</span><div><b>{preprocessComplete ? "前期预处理已完成" : "请先完成前期预处理"}</b><p>{preprocessComplete ? `${localRun?.processed.toLocaleString()} 条记录可以进入 OpenCLIP。` : "返回上一步，点击“开始预处理”。"}</p></div>{!preprocessComplete && <button className="primary" onClick={() => navigate("preprocess")}>返回预处理</button>}</div>
+      <section className="model-stack"><div><span className="eyebrow light">NEXT REQUIRED COMPONENT</span><h2>OpenCLIP 执行器 <i>+</i> 分类器模型</h2><p>当前电脑尚未配置 Python ML 环境 · 原始图片仍保留在本地</p></div><div><span>候选阈值</span><strong>p ≥ {threshold.toFixed(2)}</strong><input aria-label="候选阈值" type="range" min="0.05" max="0.9" step="0.05" value={threshold} onChange={(event) => setThreshold(Number(event.target.value))} /></div></section>
+      <section className="next-action-panel panel"><span className="eyebrow">WHY REVIEW IS NOT READY</span><h2>还不能进入人工审核，因为尚未产生真实模型结果</h2><p>接入后，系统会读取这 {localRun?.processed ?? localProject?.record_count ?? 0} 张图片，保存每张图片的概率，并自动把 <b>p ≥ {threshold.toFixed(2)}</b> 的图片送入 AI 单图审核。低分记录只归档，不会被删除。</p><ol><li><span>1</span><div><b>安装隔离的 OpenCLIP 环境</b><small>需要 torch、open_clip_torch 与现有分类器依赖。</small></div></li><li><span>2</span><div><b>选择语言对应的分类器</b><small>你的当前数据需要先确认应使用 EN、ES 还是 JA 模型。</small></div></li><li><span>3</span><div><b>运行模型并生成候选队列</b><small>候选队列生成后，“AI 单图审核”和“人工纠正”才会解锁。</small></div></li></ol><button className="primary" disabled>下一阶段：配置 OpenCLIP 执行器</button></section>
+    </section>;
+    return <section className="workspace-page"><PageHeading surface="LOCAL" eyebrow="STEP 02 · HIGH RECALL" title="本地模型高召回筛选" description="OpenCLIP 与自训练分类器运行在电脑后端。阈值只控制候选集，不代表最终信息图判断。" action={<button className="primary" onClick={toggleRun}>{runState === "running" ? "暂停示例" : "运行示例"}</button>} />
+      <section className="model-stack"><div><span className="eyebrow light">MODEL STACK</span><h2>ViT-B/32 <i>→</i> StandardScaler <i>→</i> Logistic Regression</h2><p>laion2b_s34b_b79k · infographic classifier v3 · 本地 MPS</p></div><div><span>候选阈值</span><strong>p ≥ {threshold.toFixed(2)}</strong><input aria-label="候选阈值" type="range" min="0.05" max="0.9" step="0.05" value={threshold} onChange={(event) => setThreshold(Number(event.target.value))} /></div></section>
+      <div className="metric-strip compact"><article><span>模型输入</span><strong>42,534</strong><small>预处理通过</small></article><article><span>候选集</span><strong>5,892</strong><small>进入 AI 审核</small></article><article><span>低于阈值</span><strong>36,642</strong><small>保留审计记录</small></article><article><span>读取失败</span><strong>17</strong><small>单独重试</small></article></div>
+      <section className="panel"><div className="panel-heading"><div><span className="eyebrow">INTERACTIVE SAMPLE</span><h2>候选分数预览</h2></div><span className="sample-pill">6 条脱敏样例</span></div><div className="score-list">{records.map((record) => <div key={record.id}><p><b>{record.id}</b><small>{record.title}</small></p><div><i style={{ width: `${record.clip * 100}%` }} /></div><em>{record.clip.toFixed(2)}</em><span className={record.clip >= threshold ? "pass" : "fail"}>{record.clip >= threshold ? "进入" : "排除"}</span></div>)}</div></section>
+    </section>;
+  };
 
   const renderGpt = () => <section className="workspace-page"><PageHeading surface="API" eyebrow="STEP 03 · AI REVIEW" title="AI 单图审核" description="本地后端将候选图片按结构化 Prompt 调用视觉模型，管理密钥、并发、费用、超时与重试。" action={<button className="primary" onClick={() => navigate("human")}>进入人工纠正 →</button>} />
     <div className="connector-banner"><div><span className="connector-mark">AI</span><p><b>OpenAI Vision Adapter</b><small>GPT-5.5 snapshot · Prompt infographic_review_v1</small></p></div><span className="connector-state">公开版：已保存结果</span></div>
@@ -415,7 +429,7 @@ export default function Home() {
 
   return <main className="app-shell">
     <aside className="app-sidebar"><div className="brand"><span className="brand-mark">IF</span><div><strong>InsightFlow</strong><small>LOCAL-FIRST SCREENING</small></div></div><div className="mode-card"><span className={`status-dot ${liveMode ? "online" : isLocalMode ? "offline" : "preview"}`} /><div><b>{liveMode || isLocalMode ? "Local Research" : "Public Preview"}</b><small>{liveMode ? "真实本地工作区" : isLocalMode ? "正在连接运行器" : "脱敏交互演示"}</small></div></div><nav aria-label="InsightFlow 主导航">{navGroups.map((group) => <div className="nav-group" key={group.label}><span>{group.label}</span>{group.items.map((item) => <button className={activeView === item.id ? "active" : ""} onClick={() => navigate(item.id)} key={item.id}><i />{item.title}{item.id === "human" && <em>426</em>}</button>)}</div>)}</nav><div className="sidebar-agent"><div><span className={`status-dot ${liveMode ? "online" : "offline"}`} /><b>Local Agent</b></div><small>{liveMode ? localProject ? localProject.name : "已连接，等待项目" : isLocalMode ? "连接失败，自动重试中" : "研究运行器未连接"}</small><button onClick={openSetup}>{liveMode ? "打开项目 →" : "如何连接 →"}</button></div></aside>
-    <section className="app-main"><header className="app-topbar"><div className="breadcrumb"><span>项目</span><b>{localProject?.name ?? "China Travel Infographics"}</b><em>{localRun ? `${localRun.id} · ${localRun.status}` : "Run 08 · Demo mirror"}</em></div><div className="top-actions"><button className="icon-button" aria-label="查看运行配置" onClick={() => setShowConfig(true)}>⌘</button><button className="secondary" onClick={() => navigate("overview")}>任务总览</button><button className="primary" onClick={liveMode ? toggleLocalRun : toggleRun}>{liveMode ? localRun?.status === "running" ? "暂停真实任务" : localRun ? "启动真实任务" : "创建真实任务" : runState === "running" ? "暂停任务" : "继续任务"}</button></div></header><div className="notice-bar"><span>{notice}</span><button onClick={() => setNotice(liveMode ? "本地研究模式已就绪。" : "脱敏交互预览已就绪。")}>知道了</button></div>{renderContent()}</section>
+    <section className="app-main"><header className="app-topbar"><div className="breadcrumb"><span>项目</span><b>{localProject?.name ?? "China Travel Infographics"}</b><em>{localRun ? `${localRun.id} · ${localRun.stage}` : "Run 08 · Demo mirror"}</em></div><div className="top-actions"><button className="icon-button" aria-label="查看运行配置" onClick={() => setShowConfig(true)}>⌘</button><button className="secondary" onClick={() => navigate("overview")}>任务总览</button><button className="primary" disabled={preprocessBusy} onClick={liveMode ? localPrimaryAction : toggleRun}>{liveMode ? localPrimaryLabel : runState === "running" ? "暂停任务" : "继续任务"}</button></div></header><div className="notice-bar"><span>{notice}</span><button onClick={() => setNotice(liveMode ? "本地研究模式已就绪。" : "脱敏交互预览已就绪。")}>知道了</button></div>{renderContent()}</section>
 
     {showConfig && <Modal title="运行配置快照" eyebrow="RUN CONFIGURATION" onClose={() => setShowConfig(false)}><p>真实运行开始后，规则、模型、Prompt 与阈值会冻结为版本；修改配置将创建新的 Run。</p><dl className="config-list"><div><dt>执行模式</dt><dd>Local-first</dd></div><div><dt>候选阈值</dt><dd>p ≥ {threshold.toFixed(2)}</dd></div><div><dt>本地模型</dt><dd>OpenCLIP + LR v3</dd></div><div><dt>人工阶段</dt><dd>纠正 + 残留 + 风险复核</dd></div><div><dt>保存策略</dt><dd>SQLite + 原始文件哈希</dd></div></dl><button className="primary wide" onClick={exportManifest}>下载示例运行清单</button></Modal>}
     {showLocalHelp && <Modal title="Local Research Mode" eyebrow="COMPUTER BACKEND" onClose={() => setShowLocalHelp(false)}><p>公开网址不能直接读取电脑文件。请在项目目录运行 <code>npm run local</code>，再打开终端显示的本地网址；页面会自动识别 Local Agent。</p><ol className="local-steps"><li><span>01</span><p><b>启动本地工作区</b><small>一个入口会同时启动界面和本地运行器。</small></p></li><li><span>02</span><p><b>填写图片目录与 CSV</b><small>运行器只读取你明确指定的项目。</small></p></li><li><span>03</span><p><b>创建可恢复任务</b><small>状态与审核记录保存在项目旁的 .insightflow 文件夹。</small></p></li></ol><button className="primary wide" onClick={() => setShowLocalHelp(false)}>返回产品预览</button></Modal>}

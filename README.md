@@ -38,7 +38,7 @@
 
 ## 本地研究模式（第一阶段可用）
 
-本地模式已经可以读取真实图片目录与 CSV、自动检查记录数/图片数/缺图和必要字段，并在项目旁的 `.insightflow/insightflow.db` 中保存任务与人工审核记录。服务只监听本机地址，原始图片不会上传到公开站点。
+本地模式已经可以读取真实图片目录与 CSV、自动检查记录数/图片数/缺图和必要字段，创建稳定记录 ID，并真正运行数据索引预处理。任务、预处理结果与人工审核记录保存在项目旁的 `.insightflow/insightflow.db`。服务只监听本机地址，原始图片不会上传到公开站点。
 
 ```bash
 npm install
@@ -52,7 +52,7 @@ npm run local
 
 CSV 至少需要一个稳定记录字段（`record_id` / `id` / `post_id` / `shortcode`）和一个图片路径字段（`image_path` / `file_path` / `filename` / `image` / `media_path`）。图片路径可以是相对于图片文件夹的路径。
 
-当前本地模式完成的是工作流底座；OpenCLIP 实际推理、真实记录审核队列与第三方 API Connector 将按阶段接入。
+当前本地模式会在预处理完成后明确停在 OpenCLIP 配置页。OpenCLIP 实际推理需要单独安装 ML 环境并选择语言对应的分类器；在真实候选集生成前，系统不会把脱敏示例误当成真实审核队列。
 
 ## Prerequisites
 
