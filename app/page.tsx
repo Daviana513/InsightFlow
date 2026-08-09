@@ -97,7 +97,7 @@ const aiLabel: Record<AiReview, string> = { likely_human: "倾向真人", likely
 const storageKey = "insightflow-workbench-preview-v3";
 const publicSiteOrigin = "https://insightflow-research.wuyixuan003.chatgpt.site";
 async function agentRequest<T>(path: string, init?: RequestInit): Promise<T> {
-  const host = window.location.hostname === "127.0.0.1" ? "127.0.0.1" : "localhost";
+  const host = window.location.hostname === "localhost" ? "localhost" : "127.0.0.1";
   const response = await fetch(`http://${host}:8765${path}`, {
     ...init,
     headers: { "Content-Type": "application/json", ...init?.headers },
@@ -108,7 +108,7 @@ async function agentRequest<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 function agentImageUrl(path: string) {
-  const host = window.location.hostname === "127.0.0.1" ? "127.0.0.1" : "localhost";
+  const host = window.location.hostname === "localhost" ? "localhost" : "127.0.0.1";
   return `http://${host}:8765/image?path=${encodeURIComponent(path)}`;
 }
 
