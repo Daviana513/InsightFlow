@@ -30,9 +30,15 @@ test("server-renders the InsightFlow product shell", async () => {
   const html = await response.text();
   assert.match(html, /<title>InsightFlow · Reproducible Data Screening<\/title>/i);
   assert.match(html, /InsightFlow/);
-  assert.match(html, /分阶段人工审核/);
+  assert.match(html, /上传与前期预处理/);
+  assert.match(html, /type="file"/);
+  assert.match(html, /新建 \/ 上传/);
+  assert.match(html, /<nav class="pipeline"/);
+  assert.match(html, /<button class="stage-step current"/);
   assert.match(html, /OpenCLIP/);
   assert.match(html, /GPT-5\.5/);
   assert.match(html, /C2PA/);
   assert.match(html, /腾讯云/);
+  assert.match(html, /Final Dataset/);
+  assert.match(html, /Local Demo/);
 });
