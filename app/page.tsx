@@ -1,5 +1,4 @@
 "use client";
-/* eslint-disable @next/next/no-img-element */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -9,6 +8,28 @@ type StageId = "preprocess" | "openclip" | "gpt" | "human" | "residual" | "c2pa"
 type ViewId = "overview" | StageId;
 type Visual = "map" | "poster" | "photo" | "checklist" | "timeline";
 type RunState = "paused" | "running" | "complete";
+
+type LocalProject = {
+  id: string;
+  name: string;
+  images_dir: string;
+  metadata_csv: string;
+  image_count: number;
+  record_count: number;
+  missing_images: number;
+  mapping: Record<string, string | null>;
+  ready: boolean;
+  warnings: string[];
+};
+
+type LocalRun = {
+  id: string;
+  status: "ready" | "running" | "paused" | "complete";
+  stage: string;
+  processed: number;
+  total: number;
+  threshold: number;
+};
 
 type ReviewRecord = {
   id: string;
@@ -61,6 +82,17 @@ const initialRecords: ReviewRecord[] = [
 const decisionLabel: Record<Decision, string> = { keep: "保留", remove: "排除", uncertain: "待定" };
 const aiLabel: Record<AiReview, string> = { likely_human: "倾向真人", likely_ai: "倾向 AI", uncertain: "证据不足" };
 const storageKey = "insightflow-workbench-preview-v3";
+const agentUrl = "http://127.0.0.1:8765";
+
+async function agentRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(`${agentUrl}${path}`, {
+    ...init,
+    headers: { "Content-Type": "application/json", ...init?.headers },
+  });
+  const result = await response.json() as T & { error?: string };
+  if (!response.ok) throw new Error(result.error || "Local Agent 请求失败");
+  return result;
+}
 
 function download(name: string, content: string, type: string) {
   const url = URL.createObjectURL(new Blob([content], { type }));
@@ -101,8 +133,18 @@ export default function Home() {
   const [runProgress, setRunProgress] = useState(3241);
   const [showConfig, setShowConfig] = useState(false);
   const [showLocalHelp, setShowLocalHelp] = useState(false);
+  const [showProjectSetup, setShowProjectSetup] = useState(false);
+  const [isLocalMode, setIsLocalMode] = useState(false);
+  const [agentConnected, setAgentConnected] = useState(false);
+  const [localProject, setLocalProject] = useState<LocalProject | null>(null);
+  const [localRun, setLocalRun] = useState<LocalRun | null>(null);
+  const [imagesDir, setImagesDir] = useState("");
+  const [metadataCsv, setMetadataCsv] = useState("");
+  const [setupBusy, setSetupBusy] = useState(false);
+  const [setupError, setSetupError] = useState("");
   const [notice, setNotice] = useState("这是脱敏交互预览。真实研究数据由电脑上的 Local Agent 处理，不会上传到此站点。");
 
+  /* eslint-disable react-hooks/set-state-in-effect -- hydrate browser storage and the local runtime */
   useEffect(() => {
     try {
       const saved = localStorage.getItem(storageKey);
@@ -124,6 +166,31 @@ export default function Home() {
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
+
+  useEffect(() => {
+    const local = ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
+    setIsLocalMode(local);
+    if (!local) return;
+    const ping = async () => {
+      try {
+        const result = await agentRequest<{ ok: boolean; project: LocalProject | null }>("/health");
+        setAgentConnected(result.ok);
+        if (result.project) {
+          setLocalProject(result.project);
+          setImagesDir(result.project.images_dir);
+          setMetadataCsv(result.project.metadata_csv);
+          const current = await agentRequest<{ run: LocalRun | null }>("/runs/current");
+          setLocalRun(current.run);
+        }
+      } catch {
+        setAgentConnected(false);
+      }
+    };
+    ping();
+    const timer = window.setInterval(ping, 5000);
+    return () => window.clearInterval(timer);
+  }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   useEffect(() => {
     try { localStorage.setItem(storageKey, JSON.stringify({ records, threshold })); } catch { /* sample decisions can safely reset */ }
@@ -154,9 +221,6 @@ export default function Home() {
   const humanQueue = candidates;
   const residualQueue = humanQueue.filter((record) => record.humanGptDecision === "keep");
   const finalRecords = useMemo(() => records.map((record) => ({ ...record, final: finalDecision(record, threshold) })), [records, threshold]);
-  const humanReviewed = humanQueue.filter((record) => record.humanGptDecision).length;
-  const residualReviewed = residualQueue.filter((record) => record.residualDecision).length;
-
   const updateRecord = useCallback((id: string, patch: Partial<ReviewRecord>) => {
     setRecords((current) => current.map((record) => record.id === id ? { ...record, ...patch } : record));
   }, []);
@@ -199,6 +263,58 @@ export default function Home() {
     setNotice(next === "running" ? "示例任务继续运行。你可以离开总览页查看其他阶段。" : "示例任务已暂停，当前进度已保存。");
   };
 
+  const openLocalProject = async () => {
+    setSetupBusy(true);
+    setSetupError("");
+    try {
+      const result = await agentRequest<{ project: LocalProject }>("/projects/open", {
+        method: "POST",
+        body: JSON.stringify({ images_dir: imagesDir, metadata_csv: metadataCsv }),
+      });
+      setLocalProject(result.project);
+      setLocalRun(null);
+      setNotice(`已读取本地项目：${result.project.record_count.toLocaleString()} 条记录、${result.project.image_count.toLocaleString()} 张图片。`);
+    } catch (error) {
+      setSetupError(error instanceof Error ? error.message : "无法读取这个项目");
+    } finally {
+      setSetupBusy(false);
+    }
+  };
+
+  const createLocalRun = async () => {
+    setSetupBusy(true);
+    setSetupError("");
+    try {
+      const result = await agentRequest<{ run: LocalRun }>("/runs", {
+        method: "POST",
+        body: JSON.stringify({ threshold }),
+      });
+      setLocalRun(result.run);
+      setShowProjectSetup(false);
+      setNotice(`真实任务 ${result.run.id} 已创建，配置和进度会保存在项目目录中。`);
+    } catch (error) {
+      setSetupError(error instanceof Error ? error.message : "无法创建任务");
+    } finally {
+      setSetupBusy(false);
+    }
+  };
+
+  const toggleLocalRun = async () => {
+    if (!localRun) return setShowProjectSetup(true);
+    const status = localRun.status === "running" ? "paused" : "running";
+    try {
+      const result = await agentRequest<{ run: LocalRun }>(`/runs/${localRun.id}/status`, {
+        method: "PATCH",
+        body: JSON.stringify({ status }),
+      });
+      setLocalRun(result.run);
+      setNotice(status === "running" ? "真实任务已启动。当前版本会保存任务状态；处理器将在下一阶段接入。" : "真实任务已暂停，进度已保存。即使关闭页面也不会丢失。"
+      );
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "任务状态更新失败");
+    }
+  };
+
   const exportCsv = () => {
     const headers = ["record_id", "file_name", "clip_probability", "gpt_decision", "human_correction", "residual_cleanup", "c2pa_status", "external_risk", "human_ai_review", "final_decision", "note"];
     const rows = finalRecords.map((record) => [record.id, record.fileName, record.clip, record.gpt, record.humanGptDecision, record.residualDecision, record.c2pa, record.tencentResult, record.humanAiReview, record.final, record.note].map(csvCell).join(","));
@@ -211,23 +327,36 @@ export default function Home() {
     threshold, model: "OpenCLIP ViT-B/32 + Logistic Regression", connectors: ["OpenAI vision adapter", "C2PA local", "Tencent Cloud adapter"], stages, records: finalRecords,
   }, null, 2), "application/json");
 
+  const liveMode = isLocalMode && agentConnected;
+  const openSetup = () => liveMode ? setShowProjectSetup(true) : setShowLocalHelp(true);
+
   const renderOverview = () => {
-    const percentage = Math.round((runProgress / 5892) * 100);
+    const total = liveMode ? localRun?.total ?? localProject?.record_count ?? 0 : 5892;
+    const processed = liveMode ? localRun?.processed ?? 0 : runProgress;
+    const percentage = total ? Math.round((processed / total) * 100) : 0;
+    const visibleRunState = liveMode ? localRun?.status === "running" ? "running" : localRun?.status === "complete" ? "complete" : "paused" : runState;
+    const runRows = liveMode ? [
+      ["01", "前期预处理", "LOCAL", localRun ? `${processed.toLocaleString()} / ${total.toLocaleString()}` : "等待创建任务", visibleRunState],
+      ["02", "OpenCLIP 高召回", "LOCAL", "等待接入处理器", "waiting"],
+      ["03", "GPT 单图审核", "API", "等待前序阶段", "waiting"],
+      ["04", "人工纠正", "HUMAN", "等待真实候选集", "waiting"],
+      ["05", "残留与来源检查", "MIXED", "等待前序阶段", "waiting"],
+    ] : [
+      ["01", "前期预处理", "LOCAL", "42,680 / 42,680", "complete"], ["02", "OpenCLIP 高召回", "LOCAL", "42,534 / 42,534", "complete"], ["03", "GPT 单图审核", "API", `${runProgress.toLocaleString()} / 5,892`, runState], ["04", "人工纠正", "HUMAN", "1,080 / 3,241", "attention"], ["05", "残留与来源检查", "MIXED", "等待前序阶段", "waiting"],
+    ];
     return <section className="workspace-page overview-page">
       <div className="overview-hero">
-        <div><span className="eyebrow light">LOCAL-FIRST IMAGE SCREENING</span><h1>把一次大规模筛选，<br />变成可恢复的任务。</h1><p>InsightFlow 连接电脑上的图片、模型与第三方 API，让你从一个界面启动流程、追踪异常并完成人工判断。</p><div className="hero-actions"><button className="primary large" onClick={toggleRun}>{runState === "running" ? "暂停示例任务" : runState === "complete" ? "重新运行示例" : "继续示例任务"}</button><button className="dark-secondary" onClick={() => navigate("human")}>进入人工待审队列 →</button></div></div>
-        <div className="agent-card"><div className="agent-card-head"><span className="agent-icon">LA</span><div><small>LOCAL AGENT</small><strong>研究运行器未连接</strong></div><span className="status-dot offline" /></div><p>公开站点只展示脱敏运行镜像。启动本地版后，图片始终留在电脑，界面将显示真实设备、目录和任务状态。</p><button onClick={() => setShowLocalHelp(true)}>查看本地研究模式</button></div>
+        <div><span className="eyebrow light">LOCAL-FIRST IMAGE SCREENING</span><h1>把一次大规模筛选，<br />变成可恢复的任务。</h1><p>InsightFlow 连接电脑上的图片、模型与第三方 API，让你从一个界面启动流程、追踪异常并完成人工判断。</p><div className="hero-actions"><button className="primary large" onClick={liveMode ? toggleLocalRun : toggleRun}>{liveMode ? localRun?.status === "running" ? "暂停真实任务" : localRun ? "启动真实任务" : "创建真实任务" : runState === "running" ? "暂停示例任务" : runState === "complete" ? "重新运行示例" : "继续示例任务"}</button><button className="dark-secondary" onClick={() => navigate(liveMode ? "preprocess" : "human")}>{liveMode ? "查看数据源与校验 →" : "进入人工待审队列 →"}</button></div></div>
+        <div className="agent-card"><div className="agent-card-head"><span className="agent-icon">LA</span><div><small>LOCAL AGENT</small><strong>{liveMode ? localProject ? `已连接 · ${localProject.name}` : "已连接 · 等待打开项目" : "研究运行器未连接"}</strong></div><span className={`status-dot ${liveMode ? "online" : "offline"}`} /></div><p>{liveMode ? "当前页面只连接本机运行器。目录校验、任务状态与审核记录都会保存在你的电脑中。" : "公开站点只展示脱敏运行镜像。启动本地版后，图片始终留在电脑，界面将显示真实设备、目录和任务状态。"}</p><button onClick={openSetup}>{liveMode ? localProject ? "查看本地项目" : "打开本地项目" : "查看本地研究模式"}</button></div>
       </div>
 
-      <div className="metric-strip"><article><span>原始记录</span><strong>42,680</strong><small>本地索引</small></article><article><span>OpenCLIP 候选</span><strong>5,892</strong><small>p ≥ 0.10</small></article><article><span>当前阶段</span><strong>{percentage}%</strong><small>AI 单图审核</small></article><article className="attention"><span>需要人工处理</span><strong>426</strong><small>不确定与冲突项</small></article></div>
+      <div className="metric-strip"><article><span>原始记录</span><strong>{liveMode ? (localProject?.record_count ?? 0).toLocaleString() : "42,680"}</strong><small>本地索引</small></article><article><span>OpenCLIP 候选</span><strong>{liveMode ? "—" : "5,892"}</strong><small>{liveMode ? "等待模型处理器" : "p ≥ 0.10"}</small></article><article><span>当前阶段</span><strong>{percentage}%</strong><small>{liveMode ? localRun?.stage ?? "项目设置" : "AI 单图审核"}</small></article><article className="attention"><span>需要人工处理</span><strong>{liveMode ? "—" : "426"}</strong><small>{liveMode ? "等待真实候选集" : "不确定与冲突项"}</small></article></div>
 
       <div className="overview-grid">
-        <section className="run-console panel"><div className="panel-heading"><div><span className="eyebrow">ACTIVE RUN · DEMO MIRROR</span><h2>China Travel Infographics</h2></div><span className={`run-state ${runState}`}>{runState === "running" ? "运行中" : runState === "complete" ? "已完成" : "已暂停"}</span></div>
-          <div className="active-progress"><div><span>GPT-5.5 单图审核</span><b>{runProgress.toLocaleString()} / 5,892</b></div><i><span style={{ width: `${percentage}%` }} /></i><small>示例运行速度 7 items/s · 真实速度由设备与 API 限额决定</small></div>
+        <section className="run-console panel"><div className="panel-heading"><div><span className="eyebrow">{liveMode ? "ACTIVE RUN · LOCAL" : "ACTIVE RUN · DEMO MIRROR"}</span><h2>{localProject?.name ?? "China Travel Infographics"}</h2></div><span className={`run-state ${visibleRunState}`}>{visibleRunState === "running" ? "运行中" : visibleRunState === "complete" ? "已完成" : "已暂停"}</span></div>
+          <div className="active-progress"><div><span>{liveMode ? "前期预处理" : "GPT-5.5 单图审核"}</span><b>{processed.toLocaleString()} / {total.toLocaleString()}</b></div><i><span style={{ width: `${percentage}%` }} /></i><small>{liveMode ? "当前已保存真实任务状态 · 数据处理器将在下一阶段接入" : "示例运行速度 7 items/s · 真实速度由设备与 API 限额决定"}</small></div>
           <div className="run-list">
-            {[
-              ["01", "前期预处理", "LOCAL", "42,680 / 42,680", "complete"], ["02", "OpenCLIP 高召回", "LOCAL", "42,534 / 42,534", "complete"], ["03", "GPT 单图审核", "API", `${runProgress.toLocaleString()} / 5,892`, runState], ["04", "人工纠正", "HUMAN", "1,080 / 3,241", "attention"], ["05", "残留与来源检查", "MIXED", "等待前序阶段", "waiting"],
-            ].map(([no, name, surface, progress, state]) => <button onClick={() => no === "01" ? navigate("preprocess") : no === "02" ? navigate("openclip") : no === "03" ? navigate("gpt") : no === "04" ? navigate("human") : navigate("residual")} key={no}><span>{no}</span><div><b>{name}</b><small>{surface}</small></div><em>{progress}</em><i className={`mini-state ${state}`} /></button>)}
+            {runRows.map(([no, name, surface, progress, state]) => <button onClick={() => no === "01" ? navigate("preprocess") : no === "02" ? navigate("openclip") : no === "03" ? navigate("gpt") : no === "04" ? navigate("human") : navigate("residual")} key={no}><span>{no}</span><div><b>{name}</b><small>{surface}</small></div><em>{progress}</em><i className={`mini-state ${state}`} /></button>)}
           </div>
         </section>
 
@@ -239,10 +368,10 @@ export default function Home() {
     </section>;
   };
 
-  const renderPreprocess = () => <section className="workspace-page"><PageHeading surface="LOCAL" eyebrow="STEP 01 · DATA SOURCE" title="数据源与前期预处理" description="真实模式直接索引电脑上的图片和帖文主表，不把海量原始文件上传到网页。" action={<button className="primary" onClick={() => setShowLocalHelp(true)}>连接 Local Agent</button>} />
-    <div className="local-banner"><span className="agent-icon">LA</span><div><b>研究数据应由本地后端读取</b><p>公开预览仅展示字段与规则。连接后可选择项目目录、扫描图片、映射字段并运行现有脚本。</p></div><span className="connection-pill">未连接</span></div>
-    <div className="three-grid"><article className="source-card panel"><span className="eyebrow">IMAGE SOURCE</span><h3>本地图片目录</h3><strong>42,534</strong><p>images / en · es · ja</p><small>原图不进入在线站点</small></article><article className="source-card panel"><span className="eyebrow">METADATA</span><h3>帖文主表</h3><strong>42,680</strong><p>source_master.csv</p><small>29 个字段 · 146 条缺图</small></article><article className="source-card panel"><span className="eyebrow">IDENTITY</span><h3>稳定记录索引</h3><strong>SHA-256</strong><p>record_id + image hash</p><small>用于去重、恢复和最终合并</small></article></div>
-    <div className="two-grid"><section className="panel"><div className="panel-heading"><div><span className="eyebrow">FIELD MAPPING</span><h2>字段映射预检</h2></div><span className="check-label">12/12 必要字段</span></div><div className="mapping-list">{[["图片路径", "image_path", "已匹配"], ["帖文正文", "caption", "已匹配"], ["语言", "language", "由项目目录推断"], ["帖子与轮播页", "post_shortcode + image_index", "已匹配"], ["账号信息", "account_name", "已匹配"]].map((row) => <div key={row[0]}><b>{row[0]}</b><code>{row[1]}</code><span>{row[2]}</span></div>)}</div></section>
+  const renderPreprocess = () => <section className="workspace-page"><PageHeading surface="LOCAL" eyebrow="STEP 01 · DATA SOURCE" title="数据源与前期预处理" description="真实模式直接索引电脑上的图片和帖文主表，不把海量原始文件上传到网页。" action={<button className="primary" onClick={openSetup}>{liveMode ? localProject ? "更换本地项目" : "打开本地项目" : "连接 Local Agent"}</button>} />
+    <div className="local-banner"><span className="agent-icon">LA</span><div><b>{liveMode ? localProject ? "本地项目已通过基础校验" : "Local Agent 已连接，请打开项目" : "研究数据应由本地后端读取"}</b><p>{liveMode ? localProject ? `${localProject.metadata_csv} · 数据不会上传` : "填写图片目录和 CSV 路径后，运行器会先检查字段与缺图。" : "公开预览仅展示字段与规则。连接后可选择项目目录、扫描图片、映射字段并运行现有脚本。"}</p></div><span className={`connection-pill ${liveMode ? "connected" : ""}`}>{liveMode ? "已连接" : "未连接"}</span></div>
+    <div className="three-grid"><article className="source-card panel"><span className="eyebrow">IMAGE SOURCE</span><h3>本地图片目录</h3><strong>{(localProject?.image_count ?? 42534).toLocaleString()}</strong><p>{localProject ? localProject.images_dir : "images / en · es · ja"}</p><small>原图不进入在线站点</small></article><article className="source-card panel"><span className="eyebrow">METADATA</span><h3>帖文主表</h3><strong>{(localProject?.record_count ?? 42680).toLocaleString()}</strong><p>{localProject ? localProject.metadata_csv : "source_master.csv"}</p><small>{localProject ? `${localProject.missing_images} 条缺图` : "29 个字段 · 146 条缺图"}</small></article><article className="source-card panel"><span className="eyebrow">TASK STATE</span><h3>真实任务</h3><strong>{localRun ? localRun.status.toUpperCase() : "—"}</strong><p>{localRun?.id ?? "尚未创建"}</p><small>SQLite 自动保存</small></article></div>
+    <div className="two-grid"><section className="panel"><div className="panel-heading"><div><span className="eyebrow">FIELD MAPPING</span><h2>字段映射预检</h2></div><span className="check-label">{localProject ? localProject.ready ? "必要字段已匹配" : "需要补充字段" : "DEMO MAPPING"}</span></div><div className="mapping-list">{[["稳定记录 ID", "record_id"], ["图片路径", "image_path"], ["帖文正文", "caption"], ["语言", "language"], ["账号信息", "account"]].map(([label, key]) => { const field = localProject?.mapping[key]; return <div key={key}><b>{label}</b><code>{field ?? key}</code><span>{localProject ? field ? "已匹配" : "未找到" : "示例"}</span></div>; })}</div>{localProject?.warnings.map((warning) => <p className="field-warning" key={warning}>{warning}</p>)}</section>
       <section className="panel"><div className="panel-heading"><div><span className="eyebrow">PREPROCESS RULES</span><h2>本次运行规则</h2></div><button className="text-button" onClick={() => setShowConfig(true)}>查看快照</button></div><div className="rule-list">{[["研究范围与时间", "仅保留目标国家、年份与语言"], ["帖文相关性", "根据 caption、tags 与来源字段筛选"], ["图片与轮播去重", "按哈希和 canonical record 合并"], ["缺失数据隔离", "不把读取失败当作规则排除"]].map(([title, desc]) => <div key={title}><span>✓</span><p><b>{title}</b><small>{desc}</small></p></div>)}</div><button className="secondary wide" onClick={() => navigate("openclip")}>查看本地模型阶段 →</button></section></div>
   </section>;
 
@@ -282,11 +411,12 @@ export default function Home() {
   };
 
   return <main className="app-shell">
-    <aside className="app-sidebar"><div className="brand"><span className="brand-mark">IF</span><div><strong>InsightFlow</strong><small>LOCAL-FIRST SCREENING</small></div></div><div className="mode-card"><span className="status-dot preview" /><div><b>Public Preview</b><small>脱敏交互演示</small></div></div><nav aria-label="InsightFlow 主导航">{navGroups.map((group) => <div className="nav-group" key={group.label}><span>{group.label}</span>{group.items.map((item) => <button className={activeView === item.id ? "active" : ""} onClick={() => navigate(item.id)} key={item.id}><i />{item.title}{item.id === "human" && <em>426</em>}</button>)}</div>)}</nav><div className="sidebar-agent"><div><span className="status-dot offline" /><b>Local Agent</b></div><small>研究运行器未连接</small><button onClick={() => setShowLocalHelp(true)}>如何连接 →</button></div></aside>
-    <section className="app-main"><header className="app-topbar"><div className="breadcrumb"><span>项目</span><b>China Travel Infographics</b><em>Run 08 · Demo mirror</em></div><div className="top-actions"><button className="icon-button" aria-label="查看运行配置" onClick={() => setShowConfig(true)}>⌘</button><button className="secondary" onClick={() => navigate("overview")}>任务总览</button><button className="primary" onClick={toggleRun}>{runState === "running" ? "暂停任务" : "继续任务"}</button></div></header><div className="notice-bar"><span>{notice}</span><button onClick={() => setNotice("脱敏交互预览已就绪。")}>知道了</button></div>{renderContent()}</section>
+    <aside className="app-sidebar"><div className="brand"><span className="brand-mark">IF</span><div><strong>InsightFlow</strong><small>LOCAL-FIRST SCREENING</small></div></div><div className="mode-card"><span className={`status-dot ${liveMode ? "online" : "preview"}`} /><div><b>{liveMode ? "Local Research" : "Public Preview"}</b><small>{liveMode ? "真实本地工作区" : "脱敏交互演示"}</small></div></div><nav aria-label="InsightFlow 主导航">{navGroups.map((group) => <div className="nav-group" key={group.label}><span>{group.label}</span>{group.items.map((item) => <button className={activeView === item.id ? "active" : ""} onClick={() => navigate(item.id)} key={item.id}><i />{item.title}{item.id === "human" && <em>426</em>}</button>)}</div>)}</nav><div className="sidebar-agent"><div><span className={`status-dot ${liveMode ? "online" : "offline"}`} /><b>Local Agent</b></div><small>{liveMode ? localProject ? localProject.name : "已连接，等待项目" : "研究运行器未连接"}</small><button onClick={openSetup}>{liveMode ? "打开项目 →" : "如何连接 →"}</button></div></aside>
+    <section className="app-main"><header className="app-topbar"><div className="breadcrumb"><span>项目</span><b>{localProject?.name ?? "China Travel Infographics"}</b><em>{localRun ? `${localRun.id} · ${localRun.status}` : "Run 08 · Demo mirror"}</em></div><div className="top-actions"><button className="icon-button" aria-label="查看运行配置" onClick={() => setShowConfig(true)}>⌘</button><button className="secondary" onClick={() => navigate("overview")}>任务总览</button><button className="primary" onClick={liveMode ? toggleLocalRun : toggleRun}>{liveMode ? localRun?.status === "running" ? "暂停真实任务" : localRun ? "启动真实任务" : "创建真实任务" : runState === "running" ? "暂停任务" : "继续任务"}</button></div></header><div className="notice-bar"><span>{notice}</span><button onClick={() => setNotice(liveMode ? "本地研究模式已就绪。" : "脱敏交互预览已就绪。")}>知道了</button></div>{renderContent()}</section>
 
     {showConfig && <Modal title="运行配置快照" eyebrow="RUN CONFIGURATION" onClose={() => setShowConfig(false)}><p>真实运行开始后，规则、模型、Prompt 与阈值会冻结为版本；修改配置将创建新的 Run。</p><dl className="config-list"><div><dt>执行模式</dt><dd>Local-first</dd></div><div><dt>候选阈值</dt><dd>p ≥ {threshold.toFixed(2)}</dd></div><div><dt>本地模型</dt><dd>OpenCLIP + LR v3</dd></div><div><dt>人工阶段</dt><dd>纠正 + 残留 + 风险复核</dd></div><div><dt>保存策略</dt><dd>SQLite + 原始文件哈希</dd></div></dl><button className="primary wide" onClick={exportManifest}>下载示例运行清单</button></Modal>}
-    {showLocalHelp && <Modal title="Local Research Mode" eyebrow="COMPUTER BACKEND" onClose={() => setShowLocalHelp(false)}><p>真实版本由电脑上的 Local Agent 同时提供界面与后端，因此可以安全读取项目目录、运行 OpenCLIP、保存 SQLite 进度并调用你配置的第三方 API。</p><ol className="local-steps"><li><span>01</span><p><b>启动 Local Agent</b><small>在电脑打开研究运行器。</small></p></li><li><span>02</span><p><b>选择项目目录与主表</b><small>原始图片不上传到公开网站。</small></p></li><li><span>03</span><p><b>从同一界面运行和审核</b><small>暂停后可在下一次继续。</small></p></li></ol><button className="primary wide" onClick={() => setShowLocalHelp(false)}>返回产品预览</button></Modal>}
+    {showLocalHelp && <Modal title="Local Research Mode" eyebrow="COMPUTER BACKEND" onClose={() => setShowLocalHelp(false)}><p>公开网址不能直接读取电脑文件。请在项目目录运行 <code>npm run local</code>，再打开终端显示的本地网址；页面会自动识别 Local Agent。</p><ol className="local-steps"><li><span>01</span><p><b>启动本地工作区</b><small>一个入口会同时启动界面和本地运行器。</small></p></li><li><span>02</span><p><b>填写图片目录与 CSV</b><small>运行器只读取你明确指定的项目。</small></p></li><li><span>03</span><p><b>创建可恢复任务</b><small>状态与审核记录保存在项目旁的 .insightflow 文件夹。</small></p></li></ol><button className="primary wide" onClick={() => setShowLocalHelp(false)}>返回产品预览</button></Modal>}
+    {showProjectSetup && <Modal title="打开本地研究项目" eyebrow="LOCAL PROJECT" onClose={() => setShowProjectSetup(false)}><p>填写电脑上的完整路径。运行器只索引图片和 CSV，不会把文件上传到公开网站。</p><div className="setup-form"><label><span>图片文件夹</span><input value={imagesDir} onChange={(event) => setImagesDir(event.target.value)} placeholder="/Users/你的名字/project/images" /></label><label><span>帖文主表 CSV</span><input value={metadataCsv} onChange={(event) => setMetadataCsv(event.target.value)} placeholder="/Users/你的名字/project/source_master.csv" /></label>{setupError && <p className="setup-error">{setupError}</p>}<button className="secondary wide" disabled={setupBusy || !imagesDir || !metadataCsv} onClick={openLocalProject}>{setupBusy ? "正在检查…" : localProject ? "重新检查项目" : "检查并打开项目"}</button>{localProject && <div className={`setup-result ${localProject.ready ? "ready" : "warning"}`}><b>{localProject.ready ? "基础字段已通过" : "还不能创建任务"}</b><span>{localProject.record_count.toLocaleString()} 条记录 · {localProject.image_count.toLocaleString()} 张图片 · {localProject.missing_images} 条缺图</span></div>}<button className="primary wide" disabled={setupBusy || !localProject?.ready} onClick={createLocalRun}>{localRun ? "创建一个新任务" : "创建真实任务"}</button></div></Modal>}
   </main>;
 }
 

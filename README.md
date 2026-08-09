@@ -26,8 +26,7 @@
 ## 当前公开演示版
 
 - 八个步骤均可点击进入独立工作区，并支持浏览器前进与返回
-- 支持在当前设备上传 JPG、PNG、WebP 图片并创建本地筛选任务
-- 自动保存当前设备上的阈值、规则、人工判断、备注与上传图片
+- 自动保存当前设备上的阈值、人工判断与备注
 - 三个相互独立的人工队列：GPT 纠正、残留清理、AI 图片复核
 - 支持按钮和键盘快捷键 `1 / 2 / 3` 作出保留、剔除、暂不确定的决定
 - 展示每张图片从预处理到最终人工结论的完整证据链
@@ -37,9 +36,23 @@
 
 公开版的 OpenCLIP、GPT、C2PA 与腾讯云结果均明确标记为可复现 Demo 信号，不代表真实 API 调用。设备本地保存是公开体验能力，不是论文正式运行环境。
 
-## 研究模式的下一阶段
+## 本地研究模式（第一阶段可用）
 
-正式研究模式将增加一个轻量后端，用于批量上传、任务队列、持久化人工判断、断点续跑和权限控制；模型密钥只保存在服务器端。前端界面和决策字段保持不变，以便公开演示与论文工作流共用同一套产品逻辑。
+本地模式已经可以读取真实图片目录与 CSV、自动检查记录数/图片数/缺图和必要字段，并在项目旁的 `.insightflow/insightflow.db` 中保存任务与人工审核记录。服务只监听本机地址，原始图片不会上传到公开站点。
+
+```bash
+npm install
+npm run local
+```
+
+打开终端显示的本地网址，在“数据源与预处理”中填写：
+
+1. 图片文件夹完整路径
+2. 帖文主表 CSV 完整路径
+
+CSV 至少需要一个稳定记录字段（`record_id` / `id` / `post_id` / `shortcode`）和一个图片路径字段（`image_path` / `file_path` / `filename` / `image` / `media_path`）。图片路径可以是相对于图片文件夹的路径。
+
+当前本地模式完成的是工作流底座；OpenCLIP 实际推理、真实记录审核队列与第三方 API Connector 将按阶段接入。
 
 ## Prerequisites
 
@@ -56,6 +69,8 @@ npm run build
 ## Useful Commands
 
 - `npm run dev`: start local development
+- `npm run local`: start the local UI and Local Agent together
+- `npm run agent`: start only the Local Agent on `127.0.0.1:8765`
 - `npm run build`: verify the vinext build output
 - `npm test`: build and verify the server-rendered product shell
 - `npm run db:generate`: generate Drizzle migrations after schema changes
