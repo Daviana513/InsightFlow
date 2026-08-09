@@ -2,6 +2,10 @@
 
 一个可复现、可审计的人机协同图像数据筛选工作台。这个仓库首先提供一个可公开体验的脱敏演示版，用于展示研究工作流、人工决策与单图证据链；后续可在同一界面接入真实模型和私有数据。
 
+[在线体验 InsightFlow](https://insightflow-research.wuyixuan003.chatgpt.site)
+
+![InsightFlow — Reproducible Data Screening](public/insightflow-social.png)
+
 ## 解决什么问题
 
 传统研究脚本很难让合作者复查“某张图片为什么被保留或剔除”。InsightFlow 把筛选流程、模型输出、人工纠正和来源风险检查集中在一个产品界面中，让每个最终决策都有迹可循，也让相同配置可以被再次运行。
