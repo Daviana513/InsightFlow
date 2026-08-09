@@ -95,6 +95,7 @@ const initialRecords: ReviewRecord[] = [
 const decisionLabel: Record<Decision, string> = { keep: "保留", remove: "排除", uncertain: "待定" };
 const aiLabel: Record<AiReview, string> = { likely_human: "倾向真人", likely_ai: "倾向 AI", uncertain: "证据不足" };
 const storageKey = "insightflow-workbench-preview-v3";
+const publicSiteOrigin = "https://insightflow-research.wuyixuan003.chatgpt.site";
 async function agentRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const host = window.location.hostname === "127.0.0.1" ? "127.0.0.1" : "localhost";
   const response = await fetch(`http://${host}:8765${path}`, {
@@ -195,7 +196,7 @@ export default function Home() {
   useEffect(() => {
     const local = ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
     setIsLocalMode(local);
-    if (!local) return;
+    if (!local && window.location.origin !== publicSiteOrigin) return;
     const ping = async () => {
       try {
         const result = await agentRequest<{ ok: boolean; project: LocalProject | null }>("/health");
@@ -407,7 +408,7 @@ export default function Home() {
     threshold, model: "OpenCLIP ViT-B/32 + Logistic Regression", connectors: ["OpenAI vision adapter", "C2PA local", "Tencent Cloud adapter"], stages, records: finalRecords,
   }, null, 2), "application/json");
 
-  const liveMode = isLocalMode && agentConnected;
+  const liveMode = agentConnected;
   const openSetup = () => liveMode ? setShowProjectSetup(true) : setShowLocalHelp(true);
   const preprocessComplete = Boolean(localRun && localRun.stage !== "preprocess");
   const openclipComplete = Boolean(localRun && !["preprocess", "openclip"].includes(localRun.stage));
@@ -524,7 +525,7 @@ export default function Home() {
     <section className="app-main"><header className="app-topbar"><div className="breadcrumb"><span>项目</span><b>{localProject?.name ?? "China Travel Infographics"}</b><em>{localRun ? `${localRun.id} · ${localRun.stage}` : "Run 08 · Demo mirror"}</em></div><div className="top-actions"><button className="icon-button" aria-label="查看运行配置" onClick={() => setShowConfig(true)}>⌘</button><button className="secondary" onClick={() => navigate("overview")}>任务总览</button><button className="primary" disabled={preprocessBusy} onClick={liveMode ? localPrimaryAction : toggleRun}>{liveMode ? localPrimaryLabel : runState === "running" ? "暂停任务" : "继续任务"}</button></div></header><div className="notice-bar"><span>{notice}</span><button onClick={() => setNotice(liveMode ? "本地研究模式已就绪。" : "脱敏交互预览已就绪。")}>知道了</button></div>{renderContent()}</section>
 
     {showConfig && <Modal title="运行配置快照" eyebrow="RUN CONFIGURATION" onClose={() => setShowConfig(false)}><p>真实运行开始后，规则、模型、Prompt 与阈值会冻结为版本；修改配置将创建新的 Run。</p><dl className="config-list"><div><dt>执行模式</dt><dd>Local-first</dd></div><div><dt>候选阈值</dt><dd>p ≥ {threshold.toFixed(2)}</dd></div><div><dt>本地模型</dt><dd>OpenCLIP + LR v3</dd></div><div><dt>人工阶段</dt><dd>纠正 + 残留 + 风险复核</dd></div><div><dt>保存策略</dt><dd>SQLite + 原始文件哈希</dd></div></dl><button className="primary wide" onClick={exportManifest}>下载示例运行清单</button></Modal>}
-    {showLocalHelp && <Modal title="Local Research Mode" eyebrow="COMPUTER BACKEND" onClose={() => setShowLocalHelp(false)}><p>公开网址不能直接读取电脑文件。请在项目目录运行 <code>npm run local</code>，再打开终端显示的本地网址；页面会自动识别 Local Agent。</p><ol className="local-steps"><li><span>01</span><p><b>启动本地工作区</b><small>一个入口会同时启动界面和本地运行器。</small></p></li><li><span>02</span><p><b>填写图片目录与 CSV</b><small>运行器只读取你明确指定的项目。</small></p></li><li><span>03</span><p><b>创建可恢复任务</b><small>状态与审核记录保存在项目旁的 .insightflow 文件夹。</small></p></li></ol><button className="primary wide" onClick={() => setShowLocalHelp(false)}>返回产品预览</button></Modal>}
+    {showLocalHelp && <Modal title="连接电脑上的 Local Agent" eyebrow="COMPUTER BACKEND" onClose={() => setShowLocalHelp(false)}><p>在项目目录运行 <code>npm run agent</code>（或 <code>npm run local</code>）并保持窗口开启，然后刷新当前 InsightFlow 网页。正式站点会自动连接本机运行器，图片仍不会上传。</p><ol className="local-steps"><li><span>01</span><p><b>启动 Local Agent</b><small>它只监听你的电脑，并只信任 InsightFlow 正式站点和本机页面。</small></p></li><li><span>02</span><p><b>刷新当前网页</b><small>连接成功后会自动出现“打开本地项目”。</small></p></li><li><span>03</span><p><b>填写图片目录与 CSV</b><small>任务、模型结果和人工标签全部保存在电脑中。</small></p></li></ol><button className="primary wide" onClick={() => setShowLocalHelp(false)}>返回并刷新</button></Modal>}
     {showProjectSetup && <Modal title="打开本地研究项目" eyebrow="LOCAL PROJECT" onClose={() => setShowProjectSetup(false)}><p>填写电脑上的完整路径。运行器只索引图片和 CSV，不会把文件上传到公开网站。</p><div className="setup-form"><label><span>图片文件夹</span><input value={imagesDir} onChange={(event) => setImagesDir(event.target.value)} placeholder="/Users/你的名字/project/images" /></label><label><span>帖文主表 CSV</span><input value={metadataCsv} onChange={(event) => setMetadataCsv(event.target.value)} placeholder="/Users/你的名字/project/source_master.csv" /></label>{setupError && <p className="setup-error">{setupError}</p>}<button className="secondary wide" disabled={setupBusy || !imagesDir || !metadataCsv} onClick={openLocalProject}>{setupBusy ? "正在检查…" : localProject ? "重新检查项目" : "检查并打开项目"}</button>{localProject && <div className={`setup-result ${localProject.ready ? "ready" : "warning"}`}><b>{localProject.ready ? "基础字段已通过" : "还不能创建任务"}</b><span>{localProject.record_count.toLocaleString()} 条记录 · {localProject.image_count.toLocaleString()} 张图片 · {localProject.missing_images} 条缺图</span></div>}<button className="primary wide" disabled={setupBusy || !localProject?.ready} onClick={createLocalRun}>{localRun ? "创建一个新任务" : "创建真实任务"}</button></div></Modal>}
   </main>;
 }

@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, urlparse
 
 HOST = "127.0.0.1"
 PORT = 8765
+PUBLIC_SITE_ORIGIN = "https://insightflow-research.wuyixuan003.chatgpt.site"
 ROOT = Path(__file__).resolve().parents[1]
 OPENCLIP_PYTHON = ROOT / ".venv" / "bin" / "python"
 OPENCLIP_MODEL = ROOT / ".models" / "en_infographic_v3_balanced" / "infographic_classifier.pkl"
@@ -40,6 +41,13 @@ def now() -> str:
 
 def json_bytes(payload: object) -> bytes:
     return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+
+def trusted_origin(origin: str | None) -> str | None:
+    if not origin:
+        return None
+    host = urlparse(origin).hostname
+    return origin if origin == PUBLIC_SITE_ORIGIN or host in {"localhost", "127.0.0.1", "::1"} else None
 
 
 def resolve_file(images_dir: Path, value: str) -> Path:
@@ -523,15 +531,11 @@ class Handler(BaseHTTPRequestHandler):
         print(f"[Local Agent] {format % args}")
 
     def allowed_origin(self) -> str | None:
-        origin = self.headers.get("Origin")
-        if not origin:
-            return None
-        host = urlparse(origin).hostname
-        return origin if host in {"localhost", "127.0.0.1", "::1"} else None
+        return trusted_origin(self.headers.get("Origin"))
 
     def reject_remote_origin(self) -> bool:
         if self.headers.get("Origin") and not self.allowed_origin():
-            self.send_json(403, {"error": "Local Agent 只接受本机页面的请求"})
+            self.send_json(403, {"error": "Local Agent 只接受 InsightFlow 正式站点或本机页面的请求"})
             return True
         return False
 

@@ -3,10 +3,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent.server import State, inspect_project
+from agent.server import PUBLIC_SITE_ORIGIN, State, inspect_project, trusted_origin
 
 
 class LocalAgentTest(unittest.TestCase):
+    def test_only_local_pages_and_the_official_site_are_trusted(self):
+        self.assertEqual(trusted_origin(PUBLIC_SITE_ORIGIN), PUBLIC_SITE_ORIGIN)
+        self.assertEqual(trusted_origin("http://localhost:3000"), "http://localhost:3000")
+        self.assertIsNone(trusted_origin("https://example.com"))
+
     def test_project_run_and_review_are_persisted(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
