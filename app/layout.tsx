@@ -13,18 +13,18 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "InsightFlow · Reproducible Data Screening",
-  description: "面向传播研究者的可复现 AI 数据筛选与人工复核工作台。",
+  title: "InsightFlow · Local-first Image Screening",
+  description: "连接本地图片、模型与第三方 API 的可恢复、可审计图像数据筛选工作台。",
   openGraph: {
-    title: "InsightFlow · Reproducible Data Screening",
-    description: "把 AI 初筛、人工纠正与来源检查连接成可复现的研究工作流。",
-    images: [{ url: "/insightflow-social.png", width: 1200, height: 630 }],
+    title: "InsightFlow · Local-first Image Screening",
+    description: "在一个界面启动本地筛选、追踪任务进度、完成人工审核并导出可复现数据集。",
+    images: [{ url: "/og.png", width: 1200, height: 630 }],
   },
   twitter: {
     card: "summary_large_image",
-    title: "InsightFlow · Reproducible Data Screening",
-    description: "把 AI 初筛、人工纠正与来源检查连接成可复现的研究工作流。",
-    images: ["/insightflow-social.png"],
+    title: "InsightFlow · Local-first Image Screening",
+    description: "Run locally. Review clearly. Export reproducibly.",
+    images: ["/og.png"],
   },
   icons: {
     icon: "/favicon.svg",
