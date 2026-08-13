@@ -28,19 +28,16 @@ test("server-renders the InsightFlow product shell", async () => {
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
 
   const html = await response.text();
-  assert.match(html, /<title>InsightFlow · Local-first Image Screening<\/title>/i);
+  assert.match(html, /<title>InsightFlow · Human Review Agent<\/title>/i);
   assert.match(html, /InsightFlow/);
-  assert.match(html, /把一次大规模筛选/);
-  assert.match(html, /继续示例任务/);
-  assert.match(html, /<nav aria-label="InsightFlow 主导航"/);
+  assert.match(html, /把每一次人工判断/);
+  assert.match(html, /继续上次审核/);
+  assert.match(html, /<nav>/);
   assert.match(html, /任务总览/);
   assert.match(html, /Local Agent/);
-  assert.match(html, /Public Preview/);
-  assert.match(html, /OpenCLIP/);
-  assert.match(html, /GPT-5\.5/);
-  assert.match(html, /来源凭证/);
-  assert.match(html, /外部风险检测/);
-  assert.match(html, /Final Dataset/);
-  assert.match(html, /人工待审队列/);
-  assert.match(html, /异常与待处理/);
+  assert.match(html, /公开交互预览/);
+  assert.match(html, /AI 关键词候选人工验证/);
+  assert.match(html, /感知哈希重复组复核/);
+  assert.match(html, /GPT 信息图判断纠错/);
+  assert.match(html, /导出 CSV/);
 });

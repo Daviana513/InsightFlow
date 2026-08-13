@@ -67,6 +67,15 @@ class LocalAgentTest(unittest.TestCase):
             self.assertTrue(state.save_review({
                 "run_id": run["id"], "record_id": "1", "stage": "human", "decision": "keep"
             })["saved"])
+            task = state.create_review_task({"name": "AI 关键词复核", "template": "ai_keyword"})
+            self.assertEqual(task["total"], 1)
+            page = state.get_review_item(task["id"], 0, "all")
+            self.assertEqual(page["item"]["rows"][0]["record_id"], "1")
+            saved = state.save_review_item(task["id"], "1", {"decision": "no_evidence", "note": "人工确认"})
+            self.assertEqual(saved["reviewed"], 1)
+            filename, exported = state.export_review_task(task["id"])
+            self.assertIn("reviewed.csv", filename)
+            self.assertIn("no_evidence", exported.decode("utf-8"))
 
     def test_instagram_carousel_fields_form_a_stable_record_id(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -13,18 +13,18 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "InsightFlow · Local-first Image Screening",
-  description: "连接本地图片、模型与第三方 API 的可恢复、可审计图像数据筛选工作台。",
+  title: "InsightFlow · Human Review Agent",
+  description: "连接本地图片与候选 CSV 的多阶段人工审核、对比和数据打标工作台。",
   openGraph: {
-    title: "InsightFlow · Local-first Image Screening",
-    description: "在一个界面启动本地筛选、追踪任务进度、完成人工审核并导出可复现数据集。",
-    images: [{ url: "/og.png", width: 1200, height: 630 }],
+    title: "InsightFlow · Human Review Agent",
+    description: "审核图片与帖文上下文，保存人工证据，导出可恢复、可审计的研究数据。",
+    images: [{ url: "/og-review-agent.png", width: 1200, height: 630 }],
   },
   twitter: {
     card: "summary_large_image",
-    title: "InsightFlow · Local-first Image Screening",
-    description: "Run locally. Review clearly. Export reproducibly.",
-    images: ["/og.png"],
+    title: "InsightFlow · Human Review Agent",
+    description: "Review locally. Label clearly. Export reproducibly.",
+    images: ["/og-review-agent.png"],
   },
   icons: {
     icon: "/favicon.svg",

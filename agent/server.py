@@ -36,6 +36,14 @@ FIELD_ALIASES = {
     "language": ("language", "lang"),
     "account": ("account_name", "account", "username", "author"),
 }
+REVIEW_TEMPLATES = {
+    "ai_keyword": {"layout": "single", "labels": ["explicit_ai", "suspected_ai", "no_evidence", "unrelated_keyword", "uncertain"]},
+    "duplicate": {"layout": "compare", "labels": ["exact_duplicate", "resized_duplicate", "edited_duplicate", "similar_not_duplicate", "unrelated", "uncertain"]},
+    "gpt_correction": {"layout": "single", "labels": ["keep", "remove", "uncertain"]},
+    "residual": {"layout": "single", "labels": ["infographic", "poster", "photograph", "advertisement", "other", "uncertain"]},
+    "risk": {"layout": "single", "labels": ["likely_human", "likely_ai", "insufficient", "not_applicable"]},
+    "custom": {"layout": "single", "labels": ["yes", "no", "uncertain"]},
+}
 
 
 def now() -> str:
@@ -215,6 +223,41 @@ CREATE TABLE IF NOT EXISTS training_jobs (
   updated_at TEXT NOT NULL,
   FOREIGN KEY(project_id) REFERENCES projects(id)
 );
+CREATE TABLE IF NOT EXISTS review_tasks (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  template TEXT NOT NULL,
+  layout TEXT NOT NULL,
+  id_field TEXT NOT NULL,
+  image_field TEXT NOT NULL,
+  caption_field TEXT NOT NULL DEFAULT '',
+  group_field TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'in_progress',
+  total INTEGER NOT NULL,
+  source_csv TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(project_id) REFERENCES projects(id)
+);
+CREATE TABLE IF NOT EXISTS review_items (
+  task_id TEXT NOT NULL,
+  item_id TEXT NOT NULL,
+  ordinal INTEGER NOT NULL,
+  group_id TEXT NOT NULL DEFAULT '',
+  rows_json TEXT NOT NULL,
+  image_paths_json TEXT NOT NULL,
+  decision TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
+  canonical_record_id TEXT NOT NULL DEFAULT '',
+  reviewed_at TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(task_id, item_id),
+  FOREIGN KEY(task_id) REFERENCES review_tasks(id)
+);
+CREATE INDEX IF NOT EXISTS idx_review_items_task_ordinal ON review_items(task_id, ordinal);
+CREATE INDEX IF NOT EXISTS idx_review_items_task_decision ON review_items(task_id, decision);
 """
 
 
@@ -725,6 +768,189 @@ class State:
             )
         return {"saved": True}
 
+    def create_review_task(self, payload: dict) -> dict:
+        if not self.project:
+            raise ValueError("请先打开本地图片目录和 CSV")
+        template = payload.get("template", "")
+        if template not in REVIEW_TEMPLATES:
+            raise ValueError("请选择有效的审核模板")
+        id_field = payload.get("id_field") or self.project["mapping"].get("record_id")
+        image_field = payload.get("image_field") or self.project["mapping"].get("image_path")
+        caption_field = payload.get("caption_field") or self.project["mapping"].get("caption") or ""
+        group_field = payload.get("group_field", "") if template == "duplicate" else ""
+        headers = set(self.project["headers"])
+        for field, label in ((image_field, "图片路径"),):
+            if not field or field not in headers:
+                raise ValueError(f"{label}字段不存在")
+        if not id_field or (" + " not in id_field and id_field not in headers):
+            raise ValueError("唯一 ID 字段不存在")
+        if group_field and group_field not in headers:
+            raise ValueError("重复组字段不存在")
+
+        source_csv = Path(self.project["metadata_csv"])
+        images_dir = Path(self.project["images_dir"])
+        with source_csv.open("r", encoding="utf-8-sig", newline="") as handle:
+            source_rows = list(csv.DictReader(handle))
+        grouped: dict[str, list[dict]] = {}
+        seen: set[str] = set()
+        for index, row in enumerate(source_rows, 1):
+            if " + " in id_field:
+                record_id = "#".join((row.get(part) or "").strip() for part in id_field.split(" + "))
+            else:
+                record_id = (row.get(id_field) or "").strip()
+            if not record_id:
+                raise ValueError(f"第 {index} 行缺少唯一 ID")
+            row["__insightflow_record_id"] = record_id
+            if not group_field and record_id in seen:
+                raise ValueError(f"唯一 ID 重复：{record_id}")
+            seen.add(record_id)
+            group_id = (row.get(group_field) or "").strip() if group_field else record_id
+            grouped.setdefault(group_id or record_id, []).append(row)
+
+        task_id = f"review_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:4]}"
+        timestamp = now()
+        items = []
+        for ordinal, (group_id, rows) in enumerate(grouped.items()):
+            paths = []
+            for row in rows:
+                value = (row.get(image_field) or "").strip()
+                path = resolve_file(images_dir, value)
+                if not path.is_file():
+                    path = resolve_file(source_csv.parent, value)
+                paths.append(str(path) if path.is_file() else "")
+            item_id = group_id if group_field else rows[0]["__insightflow_record_id"]
+            items.append((
+                task_id, item_id, ordinal, group_id if group_field else "",
+                json.dumps(rows, ensure_ascii=False), json.dumps(paths, ensure_ascii=False), timestamp,
+            ))
+
+        with self.lock, self.connect() as db:
+            db.execute(
+                """INSERT INTO review_tasks
+                (id, project_id, name, template, layout, id_field, image_field, caption_field,
+                 group_field, status, total, source_csv, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'in_progress', ?, ?, ?, ?)""",
+                (task_id, self.project["id"], payload.get("name") or source_csv.stem,
+                 template, REVIEW_TEMPLATES[template]["layout"], id_field, image_field,
+                 caption_field, group_field, len(items), str(source_csv), timestamp, timestamp),
+            )
+            db.executemany(
+                """INSERT INTO review_items
+                (task_id, item_id, ordinal, group_id, rows_json, image_paths_json, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                items,
+            )
+        return self.get_review_task(task_id)
+
+    def list_review_tasks(self) -> list[dict]:
+        if not self.project:
+            return []
+        with self.lock, self.connect() as db:
+            rows = db.execute(
+                """SELECT t.*, SUM(CASE WHEN i.decision != '' THEN 1 ELSE 0 END) AS reviewed
+                FROM review_tasks t LEFT JOIN review_items i ON i.task_id = t.id
+                WHERE t.project_id = ? GROUP BY t.id ORDER BY t.updated_at DESC""",
+                (self.project["id"],),
+            ).fetchall()
+        return [self._task_dict(row) for row in rows]
+
+    def _task_dict(self, row: sqlite3.Row) -> dict:
+        task = dict(row)
+        task["reviewed"] = int(task.get("reviewed") or 0)
+        task["labels"] = REVIEW_TEMPLATES.get(task["template"], REVIEW_TEMPLATES["custom"])["labels"]
+        return task
+
+    def get_review_task(self, task_id: str) -> dict:
+        with self.lock, self.connect() as db:
+            row = db.execute(
+                """SELECT t.*, SUM(CASE WHEN i.decision != '' THEN 1 ELSE 0 END) AS reviewed
+                FROM review_tasks t LEFT JOIN review_items i ON i.task_id = t.id
+                WHERE t.id = ? GROUP BY t.id""", (task_id,),
+            ).fetchone()
+        if not row:
+            raise ValueError("找不到该审核任务")
+        return self._task_dict(row)
+
+    def get_review_item(self, task_id: str, offset: int, item_filter: str) -> dict:
+        task = self.get_review_task(task_id)
+        clauses = {"unreviewed": "decision = ''", "reviewed": "decision != ''", "uncertain": "decision LIKE '%uncertain%'"}
+        where = clauses.get(item_filter, "1 = 1")
+        with self.lock, self.connect() as db:
+            total = db.execute(f"SELECT COUNT(*) FROM review_items WHERE task_id = ? AND {where}", (task_id,)).fetchone()[0]
+            offset = min(max(offset, 0), max(total - 1, 0))
+            row = db.execute(
+                f"SELECT * FROM review_items WHERE task_id = ? AND {where} ORDER BY ordinal LIMIT 1 OFFSET ?",
+                (task_id, offset),
+            ).fetchone()
+        if not row:
+            return {"task": task, "item": None, "offset": 0, "filtered_total": 0}
+        item = dict(row)
+        item["rows"] = json.loads(item.pop("rows_json"))
+        item["image_paths"] = json.loads(item.pop("image_paths_json"))
+        return {"task": task, "item": item, "offset": offset, "filtered_total": total}
+
+    def save_review_item(self, task_id: str, item_id: str, payload: dict) -> dict:
+        task = self.get_review_task(task_id)
+        decision = payload.get("decision", "")
+        if decision not in task["labels"]:
+            raise ValueError("不支持的人工标签")
+        timestamp = now()
+        with self.lock, self.connect() as db:
+            changed = db.execute(
+                """UPDATE review_items SET decision = ?, reason = ?, note = ?, canonical_record_id = ?,
+                reviewed_at = ?, updated_at = ? WHERE task_id = ? AND item_id = ?""",
+                (decision, payload.get("reason", ""), payload.get("note", ""),
+                 payload.get("canonical_record_id", ""), timestamp, timestamp, task_id, item_id),
+            ).rowcount
+            if not changed:
+                raise ValueError("找不到该审核记录")
+            reviewed = db.execute(
+                "SELECT COUNT(*) FROM review_items WHERE task_id = ? AND decision != ''", (task_id,)
+            ).fetchone()[0]
+            status = "complete" if reviewed == task["total"] else "in_progress"
+            db.execute("UPDATE review_tasks SET status = ?, updated_at = ? WHERE id = ?", (status, timestamp, task_id))
+        return self.get_review_task(task_id)
+
+    def export_review_task(self, task_id: str) -> tuple[str, bytes]:
+        task = self.get_review_task(task_id)
+        with self.lock, self.connect() as db:
+            items = db.execute("SELECT * FROM review_items WHERE task_id = ?", (task_id,)).fetchall()
+        results = {}
+        for item in items:
+            for row in json.loads(item["rows_json"]):
+                results[row["__insightflow_record_id"]] = item
+        source = Path(task["source_csv"])
+        with source.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            rows = list(reader)
+            headers = reader.fieldnames or []
+        output_headers = headers + [
+            "insightflow_task_id", "human_review_template", "human_decision", "human_reason",
+            "human_note", "canonical_record_id", "human_reviewed_at",
+        ]
+        from io import StringIO
+        buffer = StringIO()
+        writer = csv.DictWriter(buffer, fieldnames=output_headers)
+        writer.writeheader()
+        for row in rows:
+            if " + " in task["id_field"]:
+                record_id = "#".join((row.get(part) or "").strip() for part in task["id_field"].split(" + "))
+            else:
+                record_id = (row.get(task["id_field"]) or "").strip()
+            item = results.get(record_id)
+            row.update({
+                "insightflow_task_id": task_id,
+                "human_review_template": task["template"],
+                "human_decision": item["decision"] if item else "",
+                "human_reason": item["reason"] if item else "",
+                "human_note": item["note"] if item else "",
+                "canonical_record_id": item["canonical_record_id"] if item else "",
+                "human_reviewed_at": item["reviewed_at"] if item else "",
+            })
+            writer.writerow(row)
+        filename = f"{source.stem}_{task['template']}_reviewed.csv"
+        return filename, ("\ufeff" + buffer.getvalue()).encode("utf-8")
+
 
 STATE = State()
 
@@ -754,6 +980,18 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Access-Control-Allow-Private-Network", "true")
             self.send_header("Vary", "Origin")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_download(self, filename: str, body: bytes) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/csv; charset=utf-8")
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Content-Length", str(len(body)))
+        origin = self.allowed_origin()
+        if origin:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Private-Network", "true")
         self.end_headers()
         self.wfile.write(body)
 
@@ -798,6 +1036,18 @@ class Handler(BaseHTTPRequestHandler):
                 ))
             elif parsed.path == "/training/status":
                 self.send_json(200, {"job": STATE.get_training_job()})
+            elif parsed.path == "/review-tasks":
+                self.send_json(200, {"tasks": STATE.list_review_tasks()})
+            elif parsed.path == "/review-items":
+                query = parse_qs(parsed.query)
+                self.send_json(200, STATE.get_review_item(
+                    query.get("task_id", [""])[0],
+                    int(query.get("offset", ["0"])[0]),
+                    query.get("filter", ["all"])[0],
+                ))
+            elif parsed.path == "/review-export":
+                filename, body = STATE.export_review_task(parse_qs(parsed.query).get("task_id", [""])[0])
+                self.send_download(filename, body)
             elif parsed.path == "/image":
                 self.send_image(parse_qs(parsed.query).get("path", [""])[0])
             else:
@@ -826,6 +1076,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(202, {"job": STATE.start_training(payload.get("run_id", ""))})
             elif self.path == "/reviews":
                 self.send_json(200, STATE.save_review(payload))
+            elif self.path == "/review-tasks":
+                self.send_json(201, {"task": STATE.create_review_task(payload)})
             else:
                 self.send_json(404, {"error": "接口不存在"})
         except (ValueError, OSError, sqlite3.Error, json.JSONDecodeError) as error:
@@ -839,6 +1091,10 @@ class Handler(BaseHTTPRequestHandler):
             parts = self.path.strip("/").split("/")
             if len(parts) == 3 and parts[0] == "runs" and parts[2] == "status":
                 self.send_json(200, {"run": STATE.update_run(parts[1], payload.get("status", ""))})
+            elif self.path == "/review-items":
+                self.send_json(200, {"task": STATE.save_review_item(
+                    payload.get("task_id", ""), payload.get("item_id", ""), payload,
+                )})
             else:
                 self.send_json(404, {"error": "接口不存在"})
         except (ValueError, OSError, sqlite3.Error, json.JSONDecodeError) as error:
