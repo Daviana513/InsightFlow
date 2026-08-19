@@ -1,0 +1,18 @@
+.folder-picker {
+  display: flex;
+  min-height: 116px;
+  width: 100%;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px dashed #8eb5a2;
+  border-radius: 10px;
+  background: var(--soft);
+  color: var(--green);
+}
+
+.folder-picker b { font-size: 13px; }
+.folder-picker small { color: var(--muted); font-size: 9px; }
+.task-actions { flex-wrap: wrap; }
+.real-image > span { padding: 24px; text-align: center; line-height: 1.6; }
