@@ -34,7 +34,7 @@ test("server-renders the InsightFlow product shell", async () => {
   assert.match(html, /<nav>/);
   assert.match(html, /任务总览/);
   assert.match(html, /浏览器本地模式/);
-  assert.match(html, /打开本地审核文件夹/);
+  assert.match(html, /选择本地文件夹并开始/);
   assert.match(html, /导入审核 JSON/);
   assert.doesNotMatch(html, /启动 Local Agent/);
 });

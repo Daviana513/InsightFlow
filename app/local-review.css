@@ -14,5 +14,31 @@
 
 .folder-picker b { font-size: 13px; }
 .folder-picker small { color: var(--muted); font-size: 9px; }
+.start-panel { max-width: 980px; }
+.folder-step { margin-top: 24px; padding-top: 22px; border-top: 1px solid var(--line); }
+.folder-ready {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  margin-top: 14px;
+  padding: 18px;
+  border: 1px solid #9fcab3;
+  border-radius: 11px;
+  background: var(--soft);
+}
+.folder-ready > div { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
+.folder-ready b { color: var(--green); font-size: 13px; }
+.folder-ready strong { overflow: hidden; text-overflow: ellipsis; font-size: 11px; white-space: nowrap; }
+.folder-ready span, .folder-ready small { color: var(--muted); font-size: 9px; }
+.folder-ready .accent { flex: 0 0 auto; padding: 13px 18px; }
+.advanced-fields { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+.advanced-fields summary { cursor: pointer; color: var(--green); font-size: 10px; font-weight: 800; }
+.advanced-fields .field-grid { margin-top: 14px; }
 .task-actions { flex-wrap: wrap; }
 .real-image > span { padding: 24px; text-align: center; line-height: 1.6; }
+
+@media(max-width:760px) {
+  .folder-ready { align-items: stretch; flex-direction: column; }
+  .folder-ready .accent { width: 100%; }
+}

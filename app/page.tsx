@@ -21,7 +21,7 @@ const templates: Record<TemplateId, { title: string; short: string; description:
   gpt_correction: { title: "模型判断纠错", short: "结果审核", description: "保留机器原始判断，追加人工纠正、原因与备注。", layout: "single", labels: { keep: "保留", remove: "排除", uncertain: "待定" } },
   residual: { title: "非信息图残留清理", short: "结果审核", description: "细分海报、照片、广告及其他非目标图片。", layout: "single", labels: { infographic: "确认信息图", poster: "海报", photograph: "照片", advertisement: "广告", other: "其他非信息图", uncertain: "待定" } },
   risk: { title: "来源与 AI 风险复核", short: "证据复核", description: "审核外部风险信号，不覆盖图片是否属于信息图的结论。", layout: "single", labels: { likely_human: "倾向真人", likely_ai: "倾向 AI", insufficient: "证据不足", not_applicable: "不适用" } },
-  custom: { title: "自定义单图打标", short: "通用审核", description: "为新的规则或模型输出创建简单的是、否、待定审核队列。", layout: "single", labels: { yes: "是", no: "否", uncertain: "待定" } },
+  custom: { title: "通用图片筛选", short: "通用审核", description: "逐张查看图片，判断保留、排除或待定。", layout: "single", labels: { keep: "保留", remove: "排除", uncertain: "待定" } },
 };
 
 const DB_NAME = "insightflow";
@@ -72,6 +72,11 @@ function filteredItems(task: Task, filter: Filter) {
   return task.items;
 }
 function imageKey(path: string) { return path.replaceAll("\\", "/").split("/").pop() || path; }
+function isImageFile(file: File) { return /\.(jpe?g|png|webp|gif|bmp|tiff?)$/i.test(file.name); }
+function localPath(file: File) {
+  const relative = file.webkitRelativePath.replaceAll("\\", "/");
+  return relative.split("/").slice(1).join("/") || file.name;
+}
 
 function LocalImage({ file, alt }: { file?: File; alt: string }) {
   const [url] = useState(() => file ? URL.createObjectURL(file) : "");
@@ -86,7 +91,7 @@ export default function Home() {
   const [source, setSource] = useState<SourceData | null>(null);
   const [dataNames, setDataNames] = useState<string[]>([]);
   const [selectedDataName, setSelectedDataName] = useState("");
-  const [template, setTemplate] = useState<TemplateId>("ai_keyword");
+  const [template, setTemplate] = useState<TemplateId>("custom");
   const [taskName, setTaskName] = useState("");
   const [idField, setIdField] = useState("");
   const [imageField, setImageField] = useState("");
@@ -124,9 +129,9 @@ export default function Home() {
 
   const indexImages = (files: File[]) => {
     const next = new Map<string, File>();
-    files.filter((file) => /\.(jpe?g|png|webp|gif|bmp|tiff?)$/i.test(file.name)).forEach((file) => {
+    files.filter(isImageFile).forEach((file) => {
       const relative = file.webkitRelativePath.replaceAll("\\", "/");
-      const withoutRoot = relative.split("/").slice(1).join("/");
+      const withoutRoot = localPath(file);
       next.set(relative, file); next.set(withoutRoot, file); next.set(file.name, file);
     });
     setImageFiles(next);
@@ -154,10 +159,19 @@ export default function Home() {
       const list = [...files];
       const folderName = list[0].webkitRelativePath.split("/")[0] || "本地审核文件夹";
       const imageCount = indexImages(list);
+      const images = list.filter(isImageFile);
       const candidates = list.filter((file) => file.webkitRelativePath.split("/").length <= 2 && /\.(csv|json)$/i.test(file.name));
       dataFiles.current = new Map(candidates.map((file) => [file.name, file]));
       setDataNames(candidates.map((file) => file.name));
-      if (!candidates[0]) throw new Error("文件夹顶层没有 CSV 或 JSON 候选数据。请把候选文件放在文件夹根目录。");
+      if (!images.length) throw new Error("这个文件夹里没有找到可显示的图片。");
+      if (!candidates[0]) {
+        const rows = images.map((file) => ({ record_id: localPath(file), image_path: localPath(file) }));
+        setSource({ folderName, dataName: "本地图片文件夹", rows, headers: ["record_id", "image_path"], imageCount });
+        setSelectedDataName("");
+        setIdField("record_id"); setImageField("image_path"); setCaptionField(""); setGroupField("");
+        setNotice(`文件夹读取成功：${imageCount} 张图片。点击“开始图片审核”即可进入。`);
+        return;
+      }
       await loadDataFile(candidates[0], folderName, imageCount);
     } catch (error) {
       setSource(null);
@@ -293,6 +307,7 @@ export default function Home() {
 
   const imageFor = (path: string) => imageFiles.get(path) || imageFiles.get(imageKey(path));
   const contextFields = Object.entries(primaryRow).filter(([key, value]) => value && key !== activeTask?.caption_field && key !== activeTask?.image_field).slice(0, 12);
+  const openFolderPicker = () => { setView("create"); folderInput.current?.click(); };
 
   return <div className="if-shell">
     <input ref={folderInput} type="file" multiple hidden {...{ webkitdirectory: "" }} onChange={(event) => void chooseFolder(event.target.files)} />
@@ -312,18 +327,23 @@ export default function Home() {
       <div className="if-notice"><span>{notice}</span><button onClick={() => setNotice("本地审核工作区已就绪。")}>×</button></div>
 
       {view === "dashboard" && <section className="if-page dashboard">
-        <div className="dashboard-hero"><div><span className="kicker">LOCAL-FIRST · HUMAN-IN-THE-LOOP</span><h1>打开本地图片，<br />开始人工审核。</h1><p>选择包含候选 CSV/JSON 与图片的文件夹，在浏览器内完成逐图审核。数据不上传，进度保存在当前浏览器，结果导出为 JSON。</p><div><button className="accent large" onClick={() => setView("create")}>打开本地审核文件夹</button>{tasks[0] && <button className="dark" onClick={() => openTask(tasks.find((task) => task.status === "in_progress") || tasks[0])}>继续上次审核 →</button>}</div></div><div className="hero-flow"><span>本地图片 + CSV/JSON</span><i>→</i><strong>人工审核</strong><i>→</i><span>审核结果 JSON</span><small>文件只在浏览器中读取 · 判断自动保存 · 可随时导出</small></div></div>
+        <div className="dashboard-hero"><div><span className="kicker">LOCAL-FIRST · HUMAN-IN-THE-LOOP</span><h1>打开本地图片，<br />开始人工审核。</h1><p>直接选择图片文件夹；如果文件夹中还有 CSV/JSON，系统会同时读取帖文和其他字段。数据不上传，结果导出为 JSON。</p><div><button className="accent large" onClick={openFolderPicker}>选择本地文件夹并开始</button>{tasks[0] && <button className="dark" onClick={() => openTask(tasks.find((task) => task.status === "in_progress") || tasks[0])}>继续上次审核 →</button>}</div></div><div className="hero-flow"><span>本地图片 + 可选数据表</span><i>→</i><strong>人工审核</strong><i>→</i><span>审核结果 JSON</span><small>文件只在浏览器中读取 · 判断自动保存 · 可随时导出</small></div></div>
         <div className="metrics"><article><span>审核任务</span><b>{tasks.length}</b><small>{totals.active} 个进行中</small></article><article><span>候选记录</span><b>{totals.all}</b><small>单图或重复组</small></article><article><span>已完成人审</span><b>{totals.reviewed}</b><small>{totals.all ? Math.round(totals.reviewed / totals.all * 100) : 0}% 总进度</small></article><article><span>数据位置</span><b className="text-metric">LOCAL</b><small>浏览器本地保存</small></article></div>
         <div className="section-heading"><div><span className="kicker">REVIEW TASKS</span><h2>审核任务</h2></div><button className="ghost" onClick={() => setView("create")}>创建新任务</button></div>
-        <div className="task-grid">{tasks.length ? tasks.map((task) => <article className="task-card" key={task.id}><div className="task-top"><span>{templates[task.template].short}</span><em className={task.status}>{task.status === "complete" ? "已完成" : "进行中"}</em></div><h3>{task.name}</h3><p>{task.folder_name} · {task.source_name}</p><div className="progress"><div><span>审核进度</span><b>{task.reviewed} / {task.total}</b></div><i><span style={{ width: `${percentage(task)}%` }} /></i></div><div className="task-actions"><button className="accent" onClick={() => openTask(task)}>{task.status === "complete" ? "查看审核" : "继续审核"}</button><button className="ghost" onClick={() => exportJson(task)}>导出 JSON</button><button className="ghost" onClick={() => exportCsv(task)}>导出 CSV</button></div></article>) : <div className="empty-card"><h3>还没有审核任务</h3><p>选择本地文件夹，创建第一项人工审核。</p><button className="accent" onClick={() => setView("create")}>打开本地审核文件夹</button></div>}</div>
+        <div className="task-grid">{tasks.length ? tasks.map((task) => <article className="task-card" key={task.id}><div className="task-top"><span>{templates[task.template].short}</span><em className={task.status}>{task.status === "complete" ? "已完成" : "进行中"}</em></div><h3>{task.name}</h3><p>{task.folder_name} · {task.source_name}</p><div className="progress"><div><span>审核进度</span><b>{task.reviewed} / {task.total}</b></div><i><span style={{ width: `${percentage(task)}%` }} /></i></div><div className="task-actions"><button className="accent" onClick={() => openTask(task)}>{task.status === "complete" ? "查看审核" : "继续审核"}</button><button className="ghost" onClick={() => exportJson(task)}>导出 JSON</button><button className="ghost" onClick={() => exportCsv(task)}>导出 CSV</button></div></article>) : <div className="empty-card"><h3>还没有审核任务</h3><p>选择本地文件夹后即可开始，不要求必须准备 CSV。</p><button className="accent" onClick={openFolderPicker}>选择本地文件夹</button></div>}</div>
       </section>}
 
       {view === "create" && <section className="if-page create-page">
-        <div className="page-title"><span className="kicker">NEW REVIEW TASK</span><h1>创建人工审核队列</h1><p>把候选 CSV/JSON 放在文件夹顶层，图片可以放在任意子文件夹。选择后只在当前浏览器中读取。</p></div>
-        <div className="create-grid"><section className="form-panel"><div className="step-title"><span>01</span><div><b>打开本地审核文件夹</b><small>文件不会上传，也不需要填写电脑路径</small></div></div><button className="folder-picker" disabled={busy} onClick={() => folderInput.current?.click()}><b>{busy ? "正在读取…" : "选择本地文件夹"}</b><small>支持 CSV、JSON 与常见图片格式</small></button>{source && <div className="data-check ok"><b>{source.folderName}</b><span>{source.rows.length} 条记录 · {source.imageCount} 张图片 · {missingImages} 条缺图</span></div>}{dataNames.length > 1 && <label><span>候选数据文件</span><select value={selectedDataName} onChange={(event) => void switchDataFile(event.target.value)}>{dataNames.map((name) => <option key={name}>{name}</option>)}</select></label>}</section>
-          <section className="form-panel"><div className="step-title"><span>02</span><div><b>选择审核模板</b><small>模板决定布局、标签和审核问题</small></div></div><div className="template-grid">{(Object.keys(templates) as TemplateId[]).map((key) => <button className={template === key ? "selected" : ""} onClick={() => setTemplate(key)} key={key}><b>{templates[key].title}</b><small>{templates[key].description}</small></button>)}</div></section>
-        </div>
-        <section className="form-panel mapping-panel"><div className="step-title"><span>03</span><div><b>确认字段并创建任务</b><small>只选择本次审核要显示和关联的字段</small></div></div><div className="field-grid"><label><span>任务名称</span><input value={taskName} onChange={(event) => setTaskName(event.target.value)} placeholder={templates[template].title} /></label><label><span>唯一 ID 字段</span><select value={idField} onChange={(event) => setIdField(event.target.value)}><option value="">请选择</option>{source?.headers.map((field) => <option key={field}>{field}</option>)}</select></label><label><span>图片路径字段</span><select value={imageField} onChange={(event) => setImageField(event.target.value)}><option value="">请选择</option>{source?.headers.map((field) => <option key={field}>{field}</option>)}</select></label><label><span>帖文内容字段</span><select value={captionField} onChange={(event) => setCaptionField(event.target.value)}><option value="">不单独展示</option>{source?.headers.map((field) => <option key={field}>{field}</option>)}</select></label>{template === "duplicate" && <label><span>重复组 ID 字段</span><select value={groupField} onChange={(event) => setGroupField(event.target.value)}><option value="">请选择</option>{source?.headers.map((field) => <option key={field}>{field}</option>)}</select></label>}</div><button className="accent create-submit" disabled={!source || !idField || !imageField || busy || (template === "duplicate" && !groupField)} onClick={() => void createTask()}>{busy ? "正在创建…" : "创建任务并开始审核 →"}</button></section>
+        <div className="page-title"><span className="kicker">START REVIEW</span><h1>选择文件夹，开始图片审核</h1><p>只有图片也可以直接开始；如果顶层有 CSV/JSON，系统会自动读取并关联图片信息。</p></div>
+        <section className="form-panel start-panel">
+          <div className="step-title"><span>01</span><div><b>选择审核类型</b><small>默认使用通用的保留、排除、待定筛选</small></div></div>
+          <div className="template-grid">{(Object.keys(templates) as TemplateId[]).map((key) => <button className={template === key ? "selected" : ""} onClick={() => setTemplate(key)} key={key}><b>{templates[key].title}</b><small>{templates[key].description}</small></button>)}</div>
+          <div className="step-title folder-step"><span>02</span><div><b>打开本地图片文件夹</b><small>浏览器只读取文件，图片不会上传</small></div></div>
+          <button className="folder-picker" disabled={busy} onClick={() => folderInput.current?.click()}><b>{busy ? "正在读取文件夹…" : source ? "重新选择文件夹" : "选择本地图片文件夹"}</b><small>图片可放在任意子文件夹，CSV/JSON 可选</small></button>
+          {source && <div className="folder-ready" role="status"><div><b>✓ 文件夹读取成功</b><strong>{source.folderName}</strong><span>{source.imageCount} 张图片 · {source.rows.length} 条审核记录 · {missingImages} 条缺图</span><small>{source.dataName === "本地图片文件夹" ? "未发现数据表，将按图片文件名创建审核记录。" : `已关联 ${source.dataName}`}</small></div><button className="accent" disabled={!idField || !imageField || busy || (template === "duplicate" && !groupField)} onClick={() => void createTask()}>{template === "duplicate" && !groupField ? "请先设置重复组字段" : "开始图片审核 →"}</button></div>}
+          {dataNames.length > 1 && <label><span>候选数据文件</span><select value={selectedDataName} onChange={(event) => void switchDataFile(event.target.value)}>{dataNames.map((name) => <option key={name}>{name}</option>)}</select></label>}
+          {source && <details className="advanced-fields" open={!idField || !imageField || (template === "duplicate" && !groupField)}><summary>高级设置：任务名称与数据字段</summary><div className="field-grid"><label><span>任务名称</span><input value={taskName} onChange={(event) => setTaskName(event.target.value)} placeholder={templates[template].title} /></label><label><span>唯一 ID 字段</span><select value={idField} onChange={(event) => setIdField(event.target.value)}><option value="">请选择</option>{source.headers.map((field) => <option key={field}>{field}</option>)}</select></label><label><span>图片路径字段</span><select value={imageField} onChange={(event) => setImageField(event.target.value)}><option value="">请选择</option>{source.headers.map((field) => <option key={field}>{field}</option>)}</select></label><label><span>帖文内容字段</span><select value={captionField} onChange={(event) => setCaptionField(event.target.value)}><option value="">不单独展示</option>{source.headers.map((field) => <option key={field}>{field}</option>)}</select></label>{template === "duplicate" && <label><span>重复组 ID 字段</span><select value={groupField} onChange={(event) => setGroupField(event.target.value)}><option value="">请选择</option>{source.headers.map((field) => <option key={field}>{field}</option>)}</select></label>}</div></details>}
+        </section>
       </section>}
 
       {view === "review" && activeTask && currentTemplate && <section className="review-layout">
