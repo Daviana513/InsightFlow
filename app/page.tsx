@@ -11,7 +11,7 @@ type ReviewItem = { item_id: string; group_id: string; rows: CandidateRow[]; ima
 type Task = {
   id: string; name: string; template: TemplateId; layout: "single" | "compare"; status: "in_progress" | "complete";
   total: number; reviewed: number; labels: string[]; folder_name: string; source_name: string; headers: string[];
-  id_field: string; image_field: string; caption_field: string; group_field: string; updated_at: string; items: ReviewItem[];
+  id_field: string; image_field: string; caption_field: string; link_field?: string; group_field: string; updated_at: string; items: ReviewItem[];
 };
 type SourceData = { folderName: string; dataName: string; rows: CandidateRow[]; headers: string[]; imageCount: number };
 
@@ -77,6 +77,12 @@ function localPath(file: File) {
   const relative = file.webkitRelativePath.replaceAll("\\", "/");
   return relative.split("/").slice(1).join("/") || file.name;
 }
+function safePostUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return ["http:", "https:"].includes(url.protocol) ? url.href : "";
+  } catch { return ""; }
+}
 
 function LocalImage({ file, alt }: { file?: File; alt: string }) {
   const [url] = useState(() => file ? URL.createObjectURL(file) : "");
@@ -96,6 +102,7 @@ export default function Home() {
   const [idField, setIdField] = useState("");
   const [imageField, setImageField] = useState("");
   const [captionField, setCaptionField] = useState("");
+  const [linkField, setLinkField] = useState("");
   const [groupField, setGroupField] = useState("");
   const [filter, setFilter] = useState<Filter>("unreviewed");
   const [offset, setOffset] = useState(0);
@@ -148,6 +155,7 @@ export default function Home() {
     setIdField(guessField(headers, ["record_id", "id", "shortcode", "post_id"]));
     setImageField(guessField(headers, ["image_path", "image", "filename", "file_path"]));
     setCaptionField(guessField(headers, ["caption", "post_text", "text"]));
+    setLinkField(guessField(headers, ["post_url", "permalink", "post_link", "source_url", "url", "link"]));
     setGroupField(guessField(headers, ["group_id", "duplicate_group", "cluster_id"]));
     setNotice(`已读取 ${rows.length} 条候选记录和 ${imageCount} 张图片。`);
   };
@@ -168,7 +176,7 @@ export default function Home() {
         const rows = images.map((file) => ({ record_id: localPath(file), image_path: localPath(file) }));
         setSource({ folderName, dataName: "本地图片文件夹", rows, headers: ["record_id", "image_path"], imageCount });
         setSelectedDataName("");
-        setIdField("record_id"); setImageField("image_path"); setCaptionField(""); setGroupField("");
+        setIdField("record_id"); setImageField("image_path"); setCaptionField(""); setLinkField(""); setGroupField("");
         setNotice(`文件夹读取成功：${imageCount} 张图片。点击“开始图片审核”即可进入。`);
         return;
       }
@@ -220,7 +228,7 @@ export default function Home() {
       id: `review_${Date.now()}`, name: taskName.trim() || templates[template].title, template,
       layout: templates[template].layout, status: "in_progress", total: items.length, reviewed: 0,
       labels: Object.keys(templates[template].labels), folder_name: source.folderName, source_name: source.dataName,
-      headers: source.headers, id_field: idField, image_field: imageField, caption_field: captionField,
+      headers: source.headers, id_field: idField, image_field: imageField, caption_field: captionField, link_field: linkField,
       group_field: groupField, updated_at: new Date().toISOString(), items,
     };
     try {
@@ -308,7 +316,12 @@ export default function Home() {
   };
 
   const imageFor = (path: string) => imageFiles.get(path) || imageFiles.get(imageKey(path));
-  const contextFields = Object.entries(primaryRow).filter(([key, value]) => value && key !== activeTask?.caption_field && key !== activeTask?.image_field).slice(0, 12);
+  const captionKey = activeTask?.caption_field || guessField(activeTask?.headers || [], ["caption", "post_text", "text"]);
+  const linkKey = activeTask?.link_field || guessField(activeTask?.headers || [], ["post_url", "permalink", "post_link", "source_url", "url", "link"]);
+  const postText = captionKey ? primaryRow[captionKey] || "" : "";
+  const postLink = linkKey ? primaryRow[linkKey] || "" : "";
+  const postHref = safePostUrl(postLink);
+  const contextFields = Object.entries(primaryRow).filter(([key, value]) => value && key !== captionKey && key !== linkKey && key !== activeTask?.image_field).slice(0, 12);
   const openFolderPicker = () => { setView("create"); folderInput.current?.click(); };
 
   return <div className="if-shell">
@@ -344,14 +357,14 @@ export default function Home() {
           <button className="folder-picker" disabled={busy} onClick={() => folderInput.current?.click()}><b>{busy ? "正在读取文件夹…" : source ? "重新选择文件夹" : "选择本地图片文件夹"}</b><small>图片可放在任意子文件夹，CSV/JSON 可选</small></button>
           {source && <div className="folder-ready" role="status"><div><b>✓ 文件夹读取成功</b><strong>{source.folderName}</strong><span>{source.imageCount} 张图片 · {source.rows.length} 条审核记录 · {missingImages} 条缺图</span><small>{source.dataName === "本地图片文件夹" ? "未发现数据表，将按图片文件名创建审核记录。" : `已关联 ${source.dataName}`}</small></div><button className="accent" disabled={!idField || !imageField || busy || (template === "duplicate" && !groupField)} onClick={() => void createTask()}>{template === "duplicate" && !groupField ? "请先设置重复组字段" : "开始图片审核 →"}</button></div>}
           {dataNames.length > 1 && <label><span>候选数据文件</span><select value={selectedDataName} onChange={(event) => void switchDataFile(event.target.value)}>{dataNames.map((name) => <option key={name}>{name}</option>)}</select></label>}
-          {source && <details className="advanced-fields" open={!idField || !imageField || (template === "duplicate" && !groupField)}><summary>高级设置：任务名称与数据字段</summary><div className="field-grid"><label><span>任务名称</span><input value={taskName} onChange={(event) => setTaskName(event.target.value)} placeholder={templates[template].title} /></label><label><span>唯一 ID 字段</span><select value={idField} onChange={(event) => setIdField(event.target.value)}><option value="">请选择</option>{source.headers.map((field) => <option key={field}>{field}</option>)}</select></label><label><span>图片路径字段</span><select value={imageField} onChange={(event) => setImageField(event.target.value)}><option value="">请选择</option>{source.headers.map((field) => <option key={field}>{field}</option>)}</select></label><label><span>帖文内容字段</span><select value={captionField} onChange={(event) => setCaptionField(event.target.value)}><option value="">不单独展示</option>{source.headers.map((field) => <option key={field}>{field}</option>)}</select></label>{template === "duplicate" && <label><span>重复组 ID 字段</span><select value={groupField} onChange={(event) => setGroupField(event.target.value)}><option value="">请选择</option>{source.headers.map((field) => <option key={field}>{field}</option>)}</select></label>}</div></details>}
+          {source && <details className="advanced-fields" open={!idField || !imageField || (template === "duplicate" && !groupField)}><summary>高级设置：任务名称与数据字段</summary><div className="field-grid"><label><span>任务名称</span><input value={taskName} onChange={(event) => setTaskName(event.target.value)} placeholder={templates[template].title} /></label><label><span>唯一 ID 字段</span><select value={idField} onChange={(event) => setIdField(event.target.value)}><option value="">请选择</option>{source.headers.map((field) => <option key={field}>{field}</option>)}</select></label><label><span>图片路径字段</span><select value={imageField} onChange={(event) => setImageField(event.target.value)}><option value="">请选择</option>{source.headers.map((field) => <option key={field}>{field}</option>)}</select></label><label><span>完整帖文内容字段</span><select value={captionField} onChange={(event) => setCaptionField(event.target.value)}><option value="">不单独展示</option>{source.headers.map((field) => <option key={field}>{field}</option>)}</select></label><label><span>完整帖文链接字段</span><select value={linkField} onChange={(event) => setLinkField(event.target.value)}><option value="">不单独展示</option>{source.headers.map((field) => <option key={field}>{field}</option>)}</select></label>{template === "duplicate" && <label><span>重复组 ID 字段</span><select value={groupField} onChange={(event) => setGroupField(event.target.value)}><option value="">请选择</option>{source.headers.map((field) => <option key={field}>{field}</option>)}</select></label>}</div></details>}
         </section>
       </section>}
 
       {view === "review" && activeTask && currentTemplate && <section className="review-layout">
         <aside className="review-rail"><span className="kicker">QUEUE</span><h2>{activeTask.name}</h2><p>{currentTemplate.description}</p><div className="progress large-progress"><div><span>总进度</span><b>{activeTask.reviewed} / {activeTask.total}</b></div><i><span style={{ width: `${percentage(activeTask)}%` }} /></i></div><div className="filter-list">{([["all", "全部"], ["unreviewed", "未审核"], ["reviewed", "已审核"], ["uncertain", "待定"]] as [Filter, string][]).map(([value, label]) => <button className={filter === value ? "active" : ""} key={value} onClick={() => { setFilter(value); setOffset(0); }}><span>{label}</span>{value === "all" && <em>{activeTask.total}</em>}{value === "unreviewed" && <em>{activeTask.total - activeTask.reviewed}</em>}{value === "reviewed" && <em>{activeTask.reviewed}</em>}</button>)}</div><div className="rail-actions"><button className="ghost wide" onClick={() => attachInput.current?.click()}>重新选择图片文件夹</button><button className="ghost wide" onClick={() => exportJson(activeTask)}>导出审核 JSON</button><button className="ghost wide" onClick={() => exportCsv(activeTask)}>导出审核 CSV</button><button className="text" onClick={() => setView("dashboard")}>← 返回任务总览</button></div></aside>
-        {item ? <><section className="review-canvas">{!imageFiles.size && <div className="reconnect-folder" role="status"><div><b>审核进度已恢复</b><span>为保护本地文件，浏览器不会把图片保存进 JSON。请选择原图片文件夹即可继续。</span></div><button className="accent" onClick={() => attachInput.current?.click()}>重新连接图片文件夹</button></div>}<div className="review-meta"><div><b>{item.group_id || item.item_id}</b><span>{currentTemplate.layout === "compare" ? `${item.rows.length} 张候选图` : currentTemplate.short}</span></div><small>{Math.min(offset + 1, visibleItems.length)} / {visibleItems.length}</small></div><div className={currentTemplate.layout === "compare" ? "compare-images" : "single-image"}>{currentTemplate.layout === "compare" ? item.image_paths.map((path, index) => <article key={`${path}-${index}`}><div className="real-image"><LocalImage key={`${path}-${imageSession}`} file={imageFor(path)} alt={`重复候选 ${index + 1}`} /></div><label><input type="radio" name="canonical" checked={item.canonical_record_id === item.rows[index]?.[activeTask.id_field]} onChange={() => void selectCanonical(item.rows[index]?.[activeTask.id_field] || "")} /> 设为主记录</label><small>{item.rows[index]?.[activeTask.id_field]}</small></article>) : <div className="real-image"><LocalImage key={`${item.image_paths[0]}-${imageSession}`} file={imageFor(item.image_paths[0] || "")} alt={item.item_id} /></div>}</div>{activeTask.caption_field && primaryRow[activeTask.caption_field] && <div className="caption-card"><span>帖文内容 · {activeTask.caption_field}</span><p>{primaryRow[activeTask.caption_field]}</p></div>}<label className="note-field"><span>人工备注（可选）</span><textarea value={item.note} onChange={(event) => editNote(event.target.value)} onBlur={saveNote} placeholder="记录判断依据或需要讨论的问题…" /></label><div className="decision-grid">{Object.entries(currentTemplate.labels).map(([value, label], index) => <button className={item.decision === value ? "selected" : ""} disabled={busy} onClick={() => void saveDecision(value)} key={value}><kbd>{index + 1}</kbd>{label}</button>)}</div><div className="review-nav"><button disabled={offset === 0} onClick={() => goTo(offset - 1)}>← 上一项</button><span>数字键快速打标 · 左右键切换 · 判断自动保存</span><button disabled={offset + 1 >= visibleItems.length} onClick={() => goTo(offset + 1)}>下一项 →</button></div></section>
-          <aside className="context-panel"><span className="kicker">SOURCE CONTEXT</span><h2>图片与帖子信息</h2><p>原始字段只读；人工判断单独保存在审核结果中。</p><dl>{contextFields.map(([key, value]) => <div key={key}><dt>{key}</dt><dd className={key.toLowerCase().includes("keyword") ? "highlight" : ""}>{value}</dd></div>)}</dl>{item.decision && <div className="saved-decision"><span>当前人工标签</span><b>{currentTemplate.labels[item.decision] || item.decision}</b><small>{item.reviewed_at}</small></div>}</aside></> : <section className="review-empty"><span>✓</span><h2>当前队列已经处理完</h2><p>可以切换到“全部”检查历史判断，或直接导出审核结果。</p><button className="accent" onClick={() => exportJson(activeTask)}>导出审核 JSON</button></section>}
+        {item ? <><section className="review-canvas">{!imageFiles.size && <div className="reconnect-folder" role="status"><div><b>审核进度已恢复</b><span>为保护本地文件，浏览器不会把图片保存进 JSON。请选择原图片文件夹即可继续。</span></div><button className="accent" onClick={() => attachInput.current?.click()}>重新连接图片文件夹</button></div>}<div className="review-meta"><div><b>{item.group_id || item.item_id}</b><span>{currentTemplate.layout === "compare" ? `${item.rows.length} 张候选图` : currentTemplate.short}</span></div><small>{Math.min(offset + 1, visibleItems.length)} / {visibleItems.length}</small></div><div className={currentTemplate.layout === "compare" ? "compare-images" : "single-image"}>{currentTemplate.layout === "compare" ? item.image_paths.map((path, index) => <article key={`${path}-${index}`}><div className="real-image"><LocalImage key={`${path}-${imageSession}`} file={imageFor(path)} alt={`重复候选 ${index + 1}`} /></div><label><input type="radio" name="canonical" checked={item.canonical_record_id === item.rows[index]?.[activeTask.id_field]} onChange={() => void selectCanonical(item.rows[index]?.[activeTask.id_field] || "")} /> 设为主记录</label><small>{item.rows[index]?.[activeTask.id_field]}</small></article>) : <div className="real-image"><LocalImage key={`${item.image_paths[0]}-${imageSession}`} file={imageFor(item.image_paths[0] || "")} alt={item.item_id} /></div>}</div><label className="note-field"><span>人工备注（可选）</span><textarea value={item.note} onChange={(event) => editNote(event.target.value)} onBlur={saveNote} placeholder="记录判断依据或需要讨论的问题…" /></label><div className="decision-grid">{Object.entries(currentTemplate.labels).map(([value, label], index) => <button className={item.decision === value ? "selected" : ""} disabled={busy} onClick={() => void saveDecision(value)} key={value}><kbd>{index + 1}</kbd>{label}</button>)}</div><div className="review-nav"><button disabled={offset === 0} onClick={() => goTo(offset - 1)}>← 上一项</button><span>数字键快速打标 · 左右键切换 · 判断自动保存</span><button disabled={offset + 1 >= visibleItems.length} onClick={() => goTo(offset + 1)}>下一项 →</button></div></section>
+          <aside className="context-panel"><span className="kicker">POST CONTEXT</span><h2>帖子信息</h2><p>完整帖文与原始链接固定显示在这里。</p><div className="post-details">{postText && <section><b>完整帖文</b><p>{postText}</p></section>}{postLink && <section><b>完整帖文链接</b>{postHref ? <a href={postHref} target="_blank" rel="noreferrer">{postLink}<span>打开原始帖文 ↗</span></a> : <p>{postLink}</p>}</section>}{!postText && !postLink && <small>当前数据没有关联帖文内容或链接，可在新建任务的高级设置中选择对应字段。</small>}</div><dl>{contextFields.map(([key, value]) => <div key={key}><dt>{key}</dt><dd className={key.toLowerCase().includes("keyword") ? "highlight" : ""}>{value}</dd></div>)}</dl>{item.decision && <div className="saved-decision"><span>当前人工标签</span><b>{currentTemplate.labels[item.decision] || item.decision}</b><small>{item.reviewed_at}</small></div>}</aside></> : <section className="review-empty"><span>✓</span><h2>当前队列已经处理完</h2><p>可以切换到“全部”检查历史判断，或直接导出审核结果。</p><button className="accent" onClick={() => exportJson(activeTask)}>导出审核 JSON</button></section>}
       </section>}
     </main>
 
